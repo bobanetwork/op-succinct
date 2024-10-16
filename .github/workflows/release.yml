@@ -22,19 +22,18 @@ jobs:
         id: auth
         uses: google-github-actions/auth@v2
         with:
-          token_format: 'access_token'
+          create_credentials_file: 'true'
           workload_identity_provider: '${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}'
           service_account: '${{ secrets.SERVICE_ACCOUNT }}'
 
-      - name: Docker Auth
-        id: docker-auth
-        uses: 'docker/login-action@v1'
-        with:
-          username: 'oauth2accesstoken'
-          password: '${{ steps.auth.outputs.access_token }}'
-          registry: ${{ env.DOCKER_REGISTRY }}
+      - id: 'gcloud'
+        name: 'gcloud'
+        run: |-
+          gcloud auth login --brief --cred-file="${{ steps.auth.outputs.credentials_file_path }}"
+          gcloud services list
 
       - name: Push to GCP
         run: |
+          gcloud auth configure-docker ${{ env.DOCKER_REGISTRY }}
           docker build . -f proposer/op/Dockerfile.op_proposer -t ${{ env.DOCKER_REGISTRY }}/${{ secrets.GCP_PROJECT_ID }}/op-succinct-proposer:${{ github.ref_name }}
           docker push ${{ env.DOCKER_REGISTRY }}/${{ secrets.GCP_PROJECT_ID }}/op-succinct-proposer:${{ github.ref_name }}
