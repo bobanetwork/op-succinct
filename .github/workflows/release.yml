@@ -27,5 +27,5 @@ jobs:
     - name: Push to GCP
       run: |
         gcloud auth configure-docker $DOCKER_REGISTRY
-        docker build . -f proposer/op/Dockerfile.op_proposer -t $$DOCKER_REGISTRY/${{ secrets.GCP_PROJECT_ID }}/op-succinct-proposer:${{ github.ref_name }}
+        docker build . -f proposer/op/Dockerfile.op_proposer -t $DOCKER_REGISTRY/${{ secrets.GCP_PROJECT_ID }}/op-succinct-proposer:${{ github.ref_name }}
         docker push $DOCKER_REGISTRY/${{ secrets.GCP_PROJECT_ID }}/op-succinct-proposer:${{ github.ref_name }}
