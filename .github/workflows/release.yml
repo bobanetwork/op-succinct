@@ -24,14 +24,8 @@ jobs:
         workload_identity_provider: '${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}'
         service_account: '${{ secrets.SERVICE_ACCOUNT }}'
 
-    - name: Build op-proposer
-      run: |
-        cd programs/proposer
-        cargo build --release
-
     - name: Push to GCP
       run: |
         gcloud auth configure-docker $DOCKER_REGISTRY
-        docker build -f Dockerfile.op_proposer -t $$DOCKER_REGISTRY/${{ secrets.GCP_PROJECT_ID }}/op-succinct-proposer:${{ github.ref_name }} .
+        docker build . -f proposer/op/Dockerfile.op_proposer -t $$DOCKER_REGISTRY/${{ secrets.GCP_PROJECT_ID }}/op-succinct-proposer:${{ github.ref_name }} .
         docker push $$DOCKER_REGISTRY/${{ secrets.GCP_PROJECT_ID }}/op-succinct-proposer:${{ github.ref_name }}
-      working-directory: proposer/op
