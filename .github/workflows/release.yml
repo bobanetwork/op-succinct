@@ -22,15 +22,17 @@ jobs:
         id: auth
         uses: google-github-actions/auth@v2
         with:
-          create_credentials_file: 'true'
+          token_format: 'access_token'
           workload_identity_provider: '${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}'
           service_account: '${{ secrets.SERVICE_ACCOUNT }}'
 
-      - id: 'gcloud'
-        name: 'gcloud'
-        run: |-
-          gcloud auth login --brief --cred-file="${{ steps.auth.outputs.credentials_file_path }}"
-          gcloud services list
+      - name: Docker Auth
+        id: docker-auth
+        uses: 'docker/login-action@v1'
+        with:
+          username: 'oauth2accesstoken'
+          password: '${{ steps.auth.outputs.access_token }}'
+          registry: ${{ env.DOCKER_REGISTRY }}
 
       - name: Push to GCP
         run: |
