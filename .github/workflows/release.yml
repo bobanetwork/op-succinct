@@ -35,8 +35,13 @@ jobs:
           password: '${{ steps.auth.outputs.access_token }}'
           registry: ${{ env.DOCKER_REGISTRY }}
 
-      - name: Push to GCP
+      - name: Push proposr to GCP
         run: |
           gcloud auth configure-docker ${{ env.DOCKER_REGISTRY }}
           docker build . -f proposer/op/Dockerfile.op_proposer -t ${{ env.DOCKER_REGISTRY }}/${{ secrets.GCP_REPO }}/op-succinct-proposer:${{ github.ref_name }}
           docker push ${{ env.DOCKER_REGISTRY }}/${{ secrets.GCP_REPO }}/op-succinct-proposer:${{ github.ref_name }}
+
+      - name: Push server to GCP
+        run: |
+          docker build . -f proposer/succinct/Dockerfile -t ${{ env.DOCKER_REGISTRY }}/${{ secrets.GCP_REPO }}/op-succinct-server:${{ github.ref_name }}
+          docker push ${{ env.DOCKER_REGISTRY }}/${{ secrets.GCP_REPO }}/op-succinct-server:${{ github.ref_name }}
