@@ -2,8 +2,8 @@ name: Release to GCP
 
 on:
   push:
-    branches:
-      - add-boba-devnet
+    tags:
+      - 'v*.*.*'
 
 jobs:
   build:
