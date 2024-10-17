@@ -16,22 +16,27 @@ jobs:
       DOCKER_REGISTRY: us-docker.pkg.dev
 
     steps:
-    - uses: 'actions/checkout@v4'
+      - uses: 'actions/checkout@v4'
 
-    - name: Authenticate to GCP using Workload Identity Federation
-      uses: google-github-actions/auth@v2
-      with:
-        workload_identity_provider: '${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}'
-        service_account: '${{ secrets.SERVICE_ACCOUNT }}'
+      - name: Authenticate to GCP using Workload Identity Federation
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          token_format: 'access_token'
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          workload_identity_provider: '${{ secrets.WORKLOAD_IDENTITY_PROVIDER }}'
+          service_account: '${{ secrets.SERVICE_ACCOUNT }}'
 
-    - name: Build op-proposer
-      run: |
-        cd programs/proposer
-        cargo build --release
+      - name: Docker Auth
+        id: docker-auth
+        uses: 'docker/login-action@v1'
+        with:
+          username: 'oauth2accesstoken'
+          password: '${{ steps.auth.outputs.access_token }}'
+          registry: ${{ env.DOCKER_REGISTRY }}
 
-    - name: Push to GCP
-      run: |
-        gcloud auth configure-docker $DOCKER_REGISTRY
-        docker build -f Dockerfile.op_proposer -t $$DOCKER_REGISTRY/${{ secrets.GCP_PROJECT_ID }}/op-succinct-proposer:${{ github.ref_name }} .
-        docker push $$DOCKER_REGISTRY/${{ secrets.GCP_PROJECT_ID }}/op-succinct-proposer:${{ github.ref_name }}
-      working-directory: proposer/op
+      - name: Push to GCP
+        run: |
+          gcloud auth configure-docker ${{ env.DOCKER_REGISTRY }}
+          docker build . -f proposer/op/Dockerfile.op_proposer -t ${{ env.DOCKER_REGISTRY }}/${{ secrets.GCP_REPO }}/op-succinct-proposer:${{ github.ref_name }}
+          docker push ${{ env.DOCKER_REGISTRY }}/${{ secrets.GCP_REPO }}/op-succinct-proposer:${{ github.ref_name }}
