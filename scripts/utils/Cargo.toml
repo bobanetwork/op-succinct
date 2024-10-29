@@ -8,7 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 
 [[bin]]
-name = "fetch_and_save_proof"
+name = "fetch-and-save-proof"
 path = "bin/fetch_and_save_proof.rs"
 
 [[bin]]
@@ -16,7 +16,7 @@ name = "vkey"
 path = "bin/vkey.rs"
 
 [[bin]]
-name = "cost_estimator"
+name = "cost-estimator"
 path = "bin/cost_estimator.rs"
 
 [[bin]]
@@ -36,6 +36,7 @@ dotenv.workspace = true
 log.workspace = true
 csv.workspace = true
 serde = { workspace = true }
+reqwest = { workspace = true }
 futures.workspace = true
 rayon = "1.10.0"
 serde_json.workspace = true
@@ -52,6 +53,4 @@ op-succinct-client-utils.workspace = true
 sp1-sdk = { workspace = true }
 
 [build-dependencies]
-sp1-build = { workspace = true }
-op-succinct-host-utils = { workspace = true }
-cargo_metadata.workspace = true
+op-succinct-build-utils.workspace = true

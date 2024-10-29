@@ -10,60 +10,54 @@ import {OPSuccinctL2OutputOracle} from "src/OPSuccinctL2OutputOracle.sol";
 contract Utils is Test, JSONDecoder {
     function deployWithConfig(Config memory cfg) public returns (address) {
         address OPSuccinctL2OutputOracleImpl = address(new OPSuccinctL2OutputOracle());
-        address l2OutputOracleProxy = address(new Proxy(address(this)));
+        Proxy l2OutputOracleProxy = new Proxy(msg.sender);
+        upgradeAndInitialize(OPSuccinctL2OutputOracleImpl, cfg, address(l2OutputOracleProxy), true);
 
-        // Upgrade the proxy to point to the implementation and call initialize().
-        // Override the starting output root and timestmp with the passed values.
-        upgradeAndInitialize(OPSuccinctL2OutputOracleImpl, cfg, l2OutputOracleProxy, address(0));
-
-        // Transfer ownership of proxy to owner specified in the config.
-        Proxy(payable(l2OutputOracleProxy)).changeAdmin(cfg.owner);
-
-        return l2OutputOracleProxy;
+        return address(l2OutputOracleProxy);
     }
 
-    function upgradeAndInitialize(address impl, Config memory cfg, address l2OutputOracleProxy, address _spoofedAdmin)
+    // If `executeUpgradeCall` is false, the upgrade call will not be executed.
+    function upgradeAndInitialize(address impl, Config memory cfg, address l2OutputOracleProxy, bool executeUpgradeCall)
         public
     {
-        // require that the verifier gateway is deployed
+        // Require that the verifier gateway is deployed
         require(
             address(cfg.verifierGateway).code.length > 0,
             "OPSuccinctL2OutputOracleUpgrader: verifier gateway not deployed"
         );
 
         OPSuccinctL2OutputOracle.InitParams memory initParams = OPSuccinctL2OutputOracle.InitParams({
-            chainId: cfg.chainId,
             verifierGateway: cfg.verifierGateway,
             aggregationVkey: cfg.aggregationVkey,
             rangeVkeyCommitment: cfg.rangeVkeyCommitment,
-            owner: cfg.owner,
             startingOutputRoot: cfg.startingOutputRoot,
             rollupConfigHash: cfg.rollupConfigHash
         });
 
-        // If we are spoofing the admin (used in testing), start prank.
-        if (_spoofedAdmin != address(0)) vm.startPrank(_spoofedAdmin);
-
-        bytes memory upgradeCalldata = abi.encodeCall(
-            OPSuccinctL2OutputOracle.initialize,
-            (
-                cfg.submissionInterval,
-                cfg.l2BlockTime,
-                cfg.startingBlockNumber,
-                cfg.startingTimestamp,
-                cfg.proposer,
-                cfg.challenger,
-                cfg.finalizationPeriod,
-                initParams
-            )
+        bytes memory initializationParams = abi.encodeWithSelector(
+            OPSuccinctL2OutputOracle.initialize.selector,
+            cfg.submissionInterval,
+            cfg.l2BlockTime,
+            cfg.startingBlockNumber,
+            cfg.startingTimestamp,
+            cfg.proposer,
+            cfg.challenger,
+            cfg.finalizationPeriod,
+            initParams
         );
 
-        // Raw calldata for an upgrade call by a multisig.
-        bytes memory multisigCalldata = abi.encodeWithSelector(Proxy.upgradeToAndCall.selector, impl, upgradeCalldata);
-        console.log("Raw calldata for the upgrade call:");
-        console.logBytes(multisigCalldata);
+        if (executeUpgradeCall) {
+            Proxy existingProxy = Proxy(payable(l2OutputOracleProxy));
+            existingProxy.upgradeToAndCall(impl, initializationParams);
+        } else {
+            // Raw calldata for an upgrade call by a multisig.
+            bytes memory multisigCalldata = abi.encodeWithSelector(Proxy.upgradeTo.selector, impl);
+            console.log("Upgrade calldata:");
+            console.logBytes(multisigCalldata);
 
-        Proxy(payable(l2OutputOracleProxy)).upgradeToAndCall(impl, upgradeCalldata);
+            console.log("Update contract parameter calldata:");
+            console.logBytes(initializationParams);
+        }
     }
 
     // Read the config from the json file.

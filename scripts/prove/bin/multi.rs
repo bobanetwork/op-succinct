@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use op_succinct_host_utils::{
-    fetcher::{CacheMode, OPSuccinctDataFetcher, RPCMode},
+    fetcher::{CacheMode, OPSuccinctDataFetcher},
     get_proof_stdin,
     stats::ExecutionStats,
     witnessgen::WitnessGenExecutor,
@@ -34,14 +34,21 @@ struct Args {
     /// Generate proof.
     #[arg(short, long)]
     prove: bool,
+
+    /// Env file.
+    #[arg(short, long, default_value = ".env")]
+    env_file: Option<String>,
 }
 
 /// Execute the OP Succinct program for multiple blocks.
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenv::dotenv().ok();
-    utils::setup_logger();
     let args = Args::parse();
+
+    if let Some(env_file) = args.env_file {
+        dotenv::from_filename(env_file).ok();
+    }
+    utils::setup_logger();
 
     let data_fetcher = OPSuccinctDataFetcher::default();
 
@@ -84,7 +91,7 @@ async fn main() -> Result<()> {
         // Create a proof directory for the chain ID if it doesn't exist.
         let proof_dir = format!(
             "data/{}/proofs",
-            data_fetcher.get_chain_id(RPCMode::L2).await.unwrap()
+            data_fetcher.get_l2_chain_id().await.unwrap()
         );
         if !std::path::Path::new(&proof_dir).exists() {
             fs::create_dir_all(&proof_dir).unwrap();
@@ -101,7 +108,7 @@ async fn main() -> Result<()> {
             .unwrap();
         let execution_duration = start_time.elapsed();
 
-        let l2_chain_id = data_fetcher.get_chain_id(RPCMode::L2).await.unwrap();
+        let l2_chain_id = data_fetcher.get_l2_chain_id().await.unwrap();
         let report_path = format!(
             "execution-reports/multi/{}/{}-{}.csv",
             l2_chain_id, args.start, args.end

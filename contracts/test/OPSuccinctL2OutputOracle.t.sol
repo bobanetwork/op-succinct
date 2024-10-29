@@ -6,41 +6,28 @@ import {Utils} from "./helpers/Utils.sol";
 import {OPSuccinctL2OutputOracle} from "../src/OPSuccinctL2OutputOracle.sol";
 
 contract OPSuccinctL2OutputOracleTest is Test, Utils {
-    bytes32 STARTING_OUTPUT_ROOT = 0x31da1e7188abc165b685a144f92e4a15a61ba33b6dcb7b827e55f488134513ab;
-    uint256 STARTING_TIMESTAMP = 1727131352;
-    uint256 STARTING_BLOCK_NUM = 1822000;
-
-    bytes32 AGGREGATION_VKEY = 0x002fff475261fad7d14e48354686fb33a2a8263f2f603846eca4f0a44eca67f4;
-    bytes32 RANGE_VKEY_COMMITMENT = 0x3dfb83525f0a3a9118cb9c5547729551043fa7c626d4081805307b336db899ed;
-    uint256 OP_STACK_CHAIN_ID = 13269;
-
-    uint256 constant L1_BLOCK_NUM = 6747867;
-    bytes32 L1_HEAD = 0x7a19632360578cb90f01528b7aa241f13328eb76d536fd546403fe88d834322b;
-
-    bytes32 claimedOutputRoot = 0x7d1e2bc90c3907aec2a34118a9c858a5254b05812d0cabb4635847fd1e40e67e;
-    uint256 claimedL2BlockNum = 1822022;
+    // Example proof data for the BoB testnet. Tx: https://sepolia.etherscan.io/tx/0x3910121f57c2e81ac98f5154eba7a2845f7ed27caf57a73e516ca606ad9d9aab
+    uint256 checkpointedL1BlockNum = 6931062;
+    bytes32 claimedOutputRoot = 0xf5ef905ba2c0e598c2f5274177700f3dfe37f66db15e8957e63d0732b0e611b8;
+    uint256 claimedL2BlockNum = 3677705;
     bytes proof =
-        hex"5a1551d60cc24fe58c6c9b859081cf151a3e606628dbeb73767f334b3208cd25d9d87a2e0985c84df18d4289a5bffeb0c80ce9bc44ce1d4bb8c9ae79c9a0a34cc1d0f4c3211acf2fa71fa4c8ac0a3d90ca4c7cbf336b7c62ad68ccb50bdbdd415b5aca41287cf97a3929b60e68e456a3cea1669fe9d0ed2ed5954ab77ce391cff767032723a4b084bac9fe5ba41b2daefb17a7fbd9b06ddeed6ab03d6776dfdce1fc68d11cf42284705eeade326cee41c2230014185904be10c922b23f82539990bec2113058622bd1c8756e8687c8b7c916984a3ec90f96f0de06bc33e628b407a452171729c1540586033831732ccc54ca97500d0fb4aa21390f21be107d654b4b736d";
+        hex"91ff06f303ed1bf4b5dbf52b2dd7201cb9675afd59200464ef55cff01d113ca54d96b52c2689d0a64c90eb674d1cb9119e4f4fde54d9414d056112df7bf01066b86ee5e410d4d6a93c26c287e1c010bf03fcc0ebfaa6ae294650bba1bf177271c96911771624e73cf6192e3f1a5ac0bd7943f5921df5c22e1c2661a40c33a40b70e9f8d6164ab1e3e1abd666c19aae2012ec389a295e9ce148f781a81363685da83b32390785840f77691e93d734863d283a05497f8a8621dd1dc5e410b6bef0ed9ce53422a8b41ebdbc7e82202fafa1dd5a0fcc458932f76390f9d1f1fbf4134cf68dec06bf5b5b1c0cde47bd89198a52e7b92c634da6dadcf59efa6b78d51273e3316d";
+
+    // The owner of the L2OO.
+    address OWNER = 0xDEd0000E32f8F40414d3ab3a830f735a3553E18e;
 
     OPSuccinctL2OutputOracle l2oo;
-    Config config;
 
     function setUp() public {
-        vm.createSelectFork("https://ethereum-sepolia-rpc.publicnode.com", L1_BLOCK_NUM + 1);
-        config = readJson("opsuccinctl2ooconfig.json");
-
-        // set default params for testing
-        config.aggregationVkey = AGGREGATION_VKEY;
-        config.rangeVkeyCommitment = RANGE_VKEY_COMMITMENT;
-        config.startingBlockNumber = STARTING_BLOCK_NUM;
-        config.verifierGateway = 0x3B6041173B80E77f038f3F2C0f9744f04837185e;
-        config.chainId = OP_STACK_CHAIN_ID;
+        // Note: L1_RPC should be a valid Sepolia RPC.
+        vm.createSelectFork(vm.envString("L1_RPC"), checkpointedL1BlockNum + 1);
     }
 
+    // Test the L2OO contract.
     function testOPSuccinctL2OOFork() public {
-        vm.createSelectFork("https://ethereum-sepolia-rpc.publicnode.com", L1_BLOCK_NUM + 1);
-        l2oo = OPSuccinctL2OutputOracle(0xE8F5d09640Fe9Fc7C7A05c8ee9a49836b4862502);
-        l2oo.checkpointBlockHash(L1_BLOCK_NUM, L1_HEAD);
-        l2oo.proposeL2Output(claimedOutputRoot, claimedL2BlockNum, L1_HEAD, L1_BLOCK_NUM, proof);
+        l2oo = OPSuccinctL2OutputOracle(0x83EBf366f868784c91d49fBEe67651F7a3de74C5);
+        l2oo.checkpointBlockHash(checkpointedL1BlockNum);
+        vm.prank(OWNER);
+        l2oo.proposeL2Output(claimedOutputRoot, claimedL2BlockNum, checkpointedL1BlockNum, proof);
     }
 }

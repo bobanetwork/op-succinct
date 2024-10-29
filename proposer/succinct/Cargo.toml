@@ -16,6 +16,7 @@ path = "bin/server.rs"
 # workspace
 tokio = { workspace = true }
 alloy-primitives = { workspace = true }
+alloy = { workspace = true }
 
 # local
 op-succinct-host-utils.workspace = true
@@ -36,5 +37,4 @@ base64.workspace = true
 tower-http.workspace = true
 
 [build-dependencies]
-sp1-build = { workspace = true }
-cargo_metadata.workspace = true
+op-succinct-build-utils.workspace = true

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"entgo.io/ent/dialect/sql"
@@ -35,14 +36,16 @@ func InitDB(dbPath string, useCachedDb bool) (*ProofDB, error) {
 		return nil, fmt.Errorf("failed to create directories for DB: %w", err)
 	}
 
-	connectionUrl := fmt.Sprintf("file:%s?_fk=1", dbPath)
+	// Use the TL;DR SQLite settings from https://kerkour.com/sqlite-for-servers.
+	connectionUrl := fmt.Sprintf("file:%s?_fk=1&journal_mode=WAL&synchronous=normal&cache_size=100000000&busy_timeout=15000&_txlock=immediate", dbPath)
 
 	writeDrv, err := sql.Open("sqlite3", connectionUrl)
 	if err != nil {
 		return nil, fmt.Errorf("failed opening connection to sqlite: %v", err)
 	}
 	writeDb := writeDrv.DB()
-	// The write lock will be managed behind a Mutex.
+
+	// The write lock only allows one connection to the DB at a time.
 	writeDb.SetMaxOpenConns(1)
 	writeDb.SetConnMaxLifetime(time.Hour)
 
@@ -51,7 +54,7 @@ func InitDB(dbPath string, useCachedDb bool) (*ProofDB, error) {
 		return nil, fmt.Errorf("failed opening connection to sqlite: %v", err)
 	}
 	readDb := readDrv.DB()
-	readDb.SetMaxOpenConns(4)
+	readDb.SetMaxOpenConns(max(4, runtime.NumCPU()/4))
 	readDb.SetConnMaxLifetime(time.Hour)
 
 	readClient := ent.NewClient(ent.Driver(readDrv))
@@ -287,20 +290,6 @@ func (db *ProofDB) GetProofsFailedOnServer() ([]*ent.ProofRequest, error) {
 		return nil, fmt.Errorf("failed to query failed proof: %w", err)
 	}
 
-	return proofs, nil
-}
-
-// Get all proofs that are currently in the PROVING state.
-func (db *ProofDB) GetAllRequestsProving() ([]*ent.ProofRequest, error) {
-	proofs, err := db.readClient.ProofRequest.Query().
-		Where(
-			proofrequest.StatusEQ(proofrequest.StatusPROVING),
-		).
-		All(context.Background())
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to query proofs in PROVING state: %w", err)
-	}
 	return proofs, nil
 }
 

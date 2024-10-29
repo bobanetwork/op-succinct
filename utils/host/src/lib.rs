@@ -4,6 +4,7 @@ pub mod rollup_config;
 pub mod stats;
 pub mod witnessgen;
 
+use alloy::sol;
 use alloy_consensus::Header;
 use alloy_primitives::B256;
 use kona_host::{
@@ -19,8 +20,6 @@ use std::{fs::File, io::Read};
 
 use anyhow::Result;
 
-use alloy_sol_types::sol;
-
 use rkyv::{
     ser::{
         serializers::{AlignedSerializer, CompositeSerializer, HeapScratch, SharedSerializeMap},
@@ -28,6 +27,20 @@ use rkyv::{
     },
     AlignedVec,
 };
+
+sol! {
+    #[allow(missing_docs)]
+    #[sol(rpc)]
+    contract L2OutputOracle {
+        bytes32 public aggregationVkey;
+        bytes32 public rangeVkeyCommitment;
+        bytes32 public rollupConfigHash;
+
+        function updateAggregationVKey(bytes32 _aggregationVKey) external onlyOwner;
+
+        function updateRangeVkeyCommitment(bytes32 _rangeVkeyCommitment) external onlyOwner;
+    }
+}
 
 pub enum ProgramType {
     Single,
@@ -77,7 +90,7 @@ pub fn get_proof_stdin(host_cli: &HostCli) -> Result<SP1Stdin> {
         AlignedSerializer::new(AlignedVec::new()),
         // Note: This value corresponds to the size of the heap needed to serialize the KV store.
         // Increase this value if we start running into serialization issues.
-        HeapScratch::<33554432>::new(),
+        HeapScratch::<67108864>::new(),
         SharedSerializeMap::new(),
     );
     // Serialize the underlying KV store.

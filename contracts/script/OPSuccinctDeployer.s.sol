@@ -5,6 +5,7 @@ import {Script} from "forge-std/Script.sol";
 import {OPSuccinctL2OutputOracle} from "../src/OPSuccinctL2OutputOracle.sol";
 import {Utils} from "../test/helpers/Utils.sol";
 import {Proxy} from "@optimism/src/universal/Proxy.sol";
+import {console} from "forge-std/console.sol";
 
 contract OPSuccinctDeployer is Script, Utils {
     function run() public returns (address) {
@@ -16,14 +17,13 @@ contract OPSuccinctDeployer is Script, Utils {
         Config memory config = readJson("opsuccinctl2ooconfig.json");
 
         // This initializes the proxy.
-        address l2OutputOracleProxy = address(new Proxy(msg.sender));
+        OPSuccinctL2OutputOracle oracleImpl = new OPSuccinctL2OutputOracle();
+        Proxy proxy = new Proxy(msg.sender);
 
-        address OPSuccinctL2OutputOracleImpl = address(new OPSuccinctL2OutputOracle());
-
-        upgradeAndInitialize(OPSuccinctL2OutputOracleImpl, config, l2OutputOracleProxy, address(0));
+        upgradeAndInitialize(address(oracleImpl), config, address(proxy), true);
 
         vm.stopBroadcast();
 
-        return l2OutputOracleProxy;
+        return address(proxy);
     }
 }

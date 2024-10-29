@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -18,9 +19,14 @@ import (
 const PROOF_STATUS_TIMEOUT = 30 * time.Second
 const WITNESS_GEN_TIMEOUT = 20 * time.Minute
 
+// This limit is set to prevent overloading the witness generation server. Until Kona improves their native I/O API (https://github.com/anton-rs/kona/issues/553)
+// the maximum number of concurrent witness generation requests is roughly num_cpu / 2. Set it to 5 for now to be safe.
+const MAX_CONCURRENT_WITNESS_GEN = 5
+
 // Process all of the pending proofs.
 func (l *L2OutputSubmitter) ProcessPendingProofs() error {
 	// Retrieve all proofs that failed without reaching the prover network (specifically, proofs that failed with no proof ID).
+	// These are proofs that failed in the witness generation state.
 	failedReqs, err := l.db.GetProofsFailedOnServer()
 	if err != nil {
 		return fmt.Errorf("failed to get proofs failed on server: %w", err)
@@ -38,7 +44,7 @@ func (l *L2OutputSubmitter) ProcessPendingProofs() error {
 	}
 
 	// Get all proof requests that are currently in the PROVING state.
-	reqs, err := l.db.GetAllRequestsProving()
+	reqs, err := l.db.GetAllProofsWithStatus(proofrequest.StatusPROVING)
 	if err != nil {
 		return err
 	}
@@ -128,11 +134,23 @@ func (l *L2OutputSubmitter) RequestQueuedProofs(ctx context.Context) error {
 			l.Log.Info("found agg proof with already checkpointed l1 block info")
 		}
 	} else {
-		currentRequestedProofs, err := l.db.GetNumberOfRequestsWithStatuses(proofrequest.StatusPROVING, proofrequest.StatusWITNESSGEN)
+		witnessGenProofs, err := l.db.GetNumberOfRequestsWithStatuses(proofrequest.StatusWITNESSGEN)
 		if err != nil {
-			return fmt.Errorf("failed to count requested proofs: %w", err)
+			return fmt.Errorf("failed to count witnessgen proofs: %w", err)
 		}
-		if currentRequestedProofs >= int(l.Cfg.MaxConcurrentProofRequests) {
+		provingProofs, err := l.db.GetNumberOfRequestsWithStatuses(proofrequest.StatusPROVING)
+		if err != nil {
+			return fmt.Errorf("failed to count proving proofs: %w", err)
+		}
+
+		// The number of witness generation requests is capped at MAX_CONCURRENT_WITNESS_GEN.
+		if witnessGenProofs >= MAX_CONCURRENT_WITNESS_GEN {
+			l.Log.Info("max witness generation reached, waiting for next cycle")
+			return nil
+		}
+
+		// The total number of concurrent proofs is capped at MAX_CONCURRENT_PROOF_REQUESTS.
+		if (witnessGenProofs + provingProofs) >= int(l.Cfg.MaxConcurrentProofRequests) {
 			l.Log.Info("max concurrent proof requests reached, waiting for next cycle")
 			return nil
 		}
@@ -227,19 +245,6 @@ func (l *L2OutputSubmitter) RequestOPSuccinctProof(p ent.ProofRequest) error {
 	return nil
 }
 
-type SpanProofRequest struct {
-	Start uint64 `json:"start"`
-	End   uint64 `json:"end"`
-}
-
-type AggProofRequest struct {
-	Subproofs [][]byte `json:"subproofs"`
-	L1Head    string   `json:"head"`
-}
-type ProofResponse struct {
-	ProofID string `json:"proof_id"`
-}
-
 // Request a span proof for the range [l2Start, l2End].
 func (l *L2OutputSubmitter) RequestSpanProof(l2Start, l2End uint64) (string, error) {
 	if l2Start >= l2End {
@@ -256,7 +261,7 @@ func (l *L2OutputSubmitter) RequestSpanProof(l2Start, l2End uint64) (string, err
 		return "", fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	return l.RequestProofFromServer("request_span_proof", jsonBody)
+	return l.RequestProofFromServer(proofrequest.TypeSPAN, jsonBody)
 }
 
 // Request an aggregate proof for the range [start, end]. If there is not a consecutive set of span proofs,
@@ -279,12 +284,18 @@ func (l *L2OutputSubmitter) RequestAggProof(start, end uint64, l1BlockHash strin
 	}
 
 	// Request the agg proof from the server.
-	return l.RequestProofFromServer("request_agg_proof", jsonBody)
+	return l.RequestProofFromServer(proofrequest.TypeAGG, jsonBody)
 }
 
 // Request a proof from the OP Succinct server, given the path and the body of the request. Returns
 // the proof ID on a successful request.
-func (l *L2OutputSubmitter) RequestProofFromServer(urlPath string, jsonBody []byte) (string, error) {
+func (l *L2OutputSubmitter) RequestProofFromServer(proofType proofrequest.Type, jsonBody []byte) (string, error) {
+	var urlPath string
+	if proofType == proofrequest.TypeAGG {
+		urlPath = "request_agg_proof"
+	} else if proofType == proofrequest.TypeSPAN {
+		urlPath = "request_span_proof"
+	}
 	req, err := http.NewRequest("POST", l.Cfg.OPSuccinctServerUrl+"/"+urlPath, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %w", err)
@@ -324,11 +335,6 @@ func (l *L2OutputSubmitter) RequestProofFromServer(urlPath string, jsonBody []by
 	return response.ProofID, nil
 }
 
-type ProofStatus struct {
-	Status string `json:"status"`
-	Proof  []byte `json:"proof"`
-}
-
 // Get the status of a proof given its ID.
 func (l *L2OutputSubmitter) GetProofStatus(proofId string) (string, []byte, error) {
 	req, err := http.NewRequest("GET", l.Cfg.OPSuccinctServerUrl+"/status/"+proofId, nil)
@@ -364,4 +370,66 @@ func (l *L2OutputSubmitter) GetProofStatus(proofId string) (string, []byte, erro
 	}
 
 	return response.Status, response.Proof, nil
+}
+
+// Validate the contract's configuration of the aggregation and range verification keys as well
+// as the rollup config hash.
+func (l *L2OutputSubmitter) ValidateConfig(address string) error {
+	l.Log.Info("requesting config validation", "address", address)
+	requestBody := ValidateConfigRequest{
+		Address: address,
+	}
+	jsonBody, err := json.Marshal(requestBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request body: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", l.Cfg.OPSuccinctServerUrl+"/validate_config", bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{
+		Timeout: PROOF_STATUS_TIMEOUT,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		if err, ok := err.(net.Error); ok && err.Timeout() {
+			return fmt.Errorf("request timed out after %s: %w", PROOF_STATUS_TIMEOUT, err)
+		}
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read the response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("error reading the response body: %v", err)
+	}
+
+	// Create a variable of the ValidateConfigResponse type
+	var response ValidateConfigResponse
+
+	// Unmarshal the JSON into the response variable
+	err = json.Unmarshal(body, &response)
+	if err != nil {
+		return fmt.Errorf("error decoding JSON response: %v", err)
+	}
+
+	var invalidConfigs []string
+	if !response.RollupConfigHashValid {
+		invalidConfigs = append(invalidConfigs, "rollup config hash")
+	}
+	if !response.AggVkeyValid {
+		invalidConfigs = append(invalidConfigs, "aggregation verification key")
+	}
+	if !response.RangeVkeyValid {
+		invalidConfigs = append(invalidConfigs, "range verification key")
+	}
+	if len(invalidConfigs) > 0 {
+		return fmt.Errorf("config is invalid: %s", strings.Join(invalidConfigs, ", "))
+	}
+
+	return nil
 }
