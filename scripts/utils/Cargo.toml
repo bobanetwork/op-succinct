@@ -20,6 +20,10 @@ name = "cost-estimator"
 path = "bin/cost_estimator.rs"
 
 [[bin]]
+name = "block-data"
+path = "bin/block_data.rs"
+
+[[bin]]
 name = "fetch-rollup-config"
 path = "bin/fetch_rollup_config.rs"
 
@@ -51,6 +55,7 @@ op-succinct-client-utils.workspace = true
 
 # sp1
 sp1-sdk = { workspace = true }
+dashmap = { version = "6.1.0", features = ["rayon"] }
 
 [build-dependencies]
 op-succinct-build-utils.workspace = true

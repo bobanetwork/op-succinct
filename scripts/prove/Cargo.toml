@@ -30,12 +30,18 @@ dotenv.workspace = true
 num-format.workspace = true
 csv.workspace = true
 
+# kona
+kona-host = { workspace = true }
+
 # local
 op-succinct-host-utils.workspace = true
 op-succinct-client-utils.workspace = true
 
 # op-alloy
 op-alloy-genesis.workspace = true
+
+# alloy
+alloy-primitives = { workspace = true }
 
 # sp1
 sp1-sdk = { workspace = true }
