@@ -10,9 +10,9 @@
     },
     "l2_time": 1724692140,
     "system_config": {
-      "batcherAddr": "0xe40d3fB61A6a9e16ffD17ae4Ed225dE00a4B16fd",
-      "overhead": "0xbc",
-      "scalar": "0xa6fe0",
+      "batcherAddr": "0xe40d3fb61a6a9e16ffd17ae4ed225de00a4b16fd",
+      "overhead": "0x834",
+      "scalar": "0xf4240",
       "gasLimit": 30000000,
       "baseFeeScalar": null,
       "blobBaseFeeScalar": null,
