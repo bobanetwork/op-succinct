@@ -1,7 +1,10 @@
 use anyhow::Result;
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
+use sysinfo::System;
 
 use kona_host::HostCli;
+
+use crate::fetcher::RunContext;
 
 /// Convert the HostCli to a vector of arguments that can be passed to a command.
 pub fn convert_host_cli_to_args(host_cli: &HostCli) -> Vec<String> {
@@ -54,11 +57,10 @@ pub fn convert_host_cli_to_args(host_cli: &HostCli) -> Vec<String> {
 }
 
 /// Default timeout for witness generation.
-pub const WITNESSGEN_TIMEOUT: Duration = Duration::from_secs(1200);
+pub const WITNESSGEN_TIMEOUT: Duration = Duration::from_secs(60 * 20);
 
 struct WitnessGenProcess {
     child: tokio::process::Child,
-    exec: String,
     host_cli: HostCli,
 }
 
@@ -67,31 +69,39 @@ struct WitnessGenProcess {
 pub struct WitnessGenExecutor {
     ongoing_processes: Vec<WitnessGenProcess>,
     timeout: Duration,
+    run_context: RunContext,
 }
 
 impl Default for WitnessGenExecutor {
     fn default() -> Self {
-        Self::new(WITNESSGEN_TIMEOUT)
+        Self::new(WITNESSGEN_TIMEOUT, RunContext::Dev)
     }
 }
 
 impl WitnessGenExecutor {
-    pub fn new(timeout: Duration) -> Self {
+    pub fn new(timeout: Duration, run_context: RunContext) -> Self {
         Self {
             ongoing_processes: Vec::new(),
             timeout,
+            run_context,
         }
     }
 
     /// Spawn a witness generation process for the given host CLI, and adds it to the list of
     /// ongoing processes.
     pub async fn spawn_witnessgen(&mut self, host_cli: &HostCli) -> Result<()> {
-        let metadata = cargo_metadata::MetadataCommand::new()
-            .exec()
-            .expect("Failed to get cargo metadata");
-        let target_dir = metadata
-            .target_directory
-            .join("native_host_runner/release/native_host_runner");
+        let target_dir = match self.run_context {
+            RunContext::Dev => {
+                let metadata = cargo_metadata::MetadataCommand::new()
+                    .exec()
+                    .expect("Failed to get cargo metadata");
+                metadata
+                    .target_directory
+                    .join("native_host_runner/release/native_host_runner")
+                    .into()
+            }
+            RunContext::Docker => PathBuf::from("/usr/local/bin/native_host_runner"),
+        };
         let args = convert_host_cli_to_args(host_cli);
 
         // Run the native host runner.
@@ -101,7 +111,6 @@ impl WitnessGenExecutor {
             .spawn()?;
         self.ongoing_processes.push(WitnessGenProcess {
             child,
-            exec: host_cli.exec.clone().unwrap(),
             host_cli: host_cli.clone(),
         });
         Ok(())
@@ -110,14 +119,7 @@ impl WitnessGenExecutor {
     /// Wait for all ongoing witness generation processes to complete. If any process fails,
     /// kill all ongoing processes and return an error.
     pub async fn flush(&mut self) -> Result<()> {
-        let binary_name = self.ongoing_processes[0]
-            .exec
-            .split('/')
-            .last()
-            .unwrap()
-            .to_string();
-
-        // TODO: If any process fails or a Ctrl+C is received, kill all ongoing processes. This is
+        // FIXME: If any process fails or a Ctrl+C is received, kill all ongoing processes. This is
         // quite involved, as the behavior differs between Unix and Windows. When using
         // Ctrl+C handler, you also need to be careful to restore the original behavior
         // after your custom behavior, otherwise you won't be able to terminate "normally".
@@ -125,7 +127,7 @@ impl WitnessGenExecutor {
         // Wait for all processes to complete.
 
         if let Some(err) = self.wait_for_processes().await.err() {
-            self.kill_all(binary_name).await?;
+            self.kill_all().await?;
             Err(anyhow::anyhow!(
                 "Killed all witness generation processes because one failed. Error: {}",
                 err
@@ -173,19 +175,51 @@ impl WitnessGenExecutor {
     /// client" process that spawns a "witness gen" program. Just killing the "native client"
     /// process will not kill the "witness gen" program, so we need to explicitly kill the
     /// "witness gen" program as well.
-    async fn kill_all(&mut self, binary_name: String) -> Result<()> {
-        // Kill the "native client" processes.
+    async fn kill_all(&mut self) -> Result<()> {
+        let mut sys = System::new();
+        sys.refresh_all();
+
+        // Kill the "native client" processes, and the associated spawned native program process from start_server_and_native_client.
         for mut child in self.ongoing_processes.drain(..) {
-            if let Ok(None) = child.child.try_wait() {
+            if let Some(pid) = child.child.id() {
+                // Kill all child processes
+                for process in sys.processes().values() {
+                    if let Some(parent_pid) = process.parent() {
+                        if parent_pid.as_u32() == pid {
+                            process.kill();
+                        }
+                    }
+                }
+                // Kill the parent process.
                 child.child.kill().await?;
             }
         }
 
-        // Kill the spawned witness gen program.
-        std::process::Command::new("pkill")
-            .arg("-f")
-            .arg(binary_name)
-            .output()?;
         Ok(())
+    }
+}
+
+/// Concurrently run the native data generation process for each split range.
+pub async fn run_native_data_generation(host_clis: &[HostCli]) {
+    const CONCURRENT_NATIVE_HOST_RUNNERS: usize = 5;
+
+    // Split the entire range into chunks of size CONCURRENT_NATIVE_HOST_RUNNERS and process chunks
+    // serially. Generate witnesses within each chunk in parallel. This prevents the RPC from
+    // being overloaded with too many concurrent requests, while also improving witness generation
+    // throughput.
+    for chunk in host_clis.chunks(CONCURRENT_NATIVE_HOST_RUNNERS) {
+        let mut witnessgen_executor = WitnessGenExecutor::default();
+
+        for host_cli in chunk {
+            witnessgen_executor
+                .spawn_witnessgen(host_cli)
+                .await
+                .expect("Failed to spawn witness generation process");
+        }
+
+        witnessgen_executor
+            .flush()
+            .await
+            .expect("Failed to generate witnesses");
     }
 }

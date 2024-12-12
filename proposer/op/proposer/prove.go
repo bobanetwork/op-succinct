@@ -25,39 +25,24 @@ const MAX_CONCURRENT_WITNESS_GEN = 5
 
 // Process all of the pending proofs.
 func (l *L2OutputSubmitter) ProcessPendingProofs() error {
-	// Retrieve all proofs that failed without reaching the prover network (specifically, proofs that failed with no proof ID).
-	// These are proofs that failed in the witness generation state.
-	failedReqs, err := l.db.GetProofsFailedOnServer()
-	if err != nil {
-		return fmt.Errorf("failed to get proofs failed on server: %w", err)
-	}
-
-	if len(failedReqs) > 0 {
-		l.Log.Info("Retrying failed proofs.", "failed", len(failedReqs))
-	}
-
-	for _, req := range failedReqs {
-		err = l.RetryRequest(req)
-		if err != nil {
-			return fmt.Errorf("failed to retry request: %w", err)
-		}
-	}
-
 	// Get all proof requests that are currently in the PROVING state.
 	reqs, err := l.db.GetAllProofsWithStatus(proofrequest.StatusPROVING)
 	if err != nil {
 		return err
 	}
 	for _, req := range reqs {
-		status, proof, err := l.GetProofStatus(req.ProverRequestID)
+		proofStatus, err := l.GetProofStatus(req.ProverRequestID)
 		if err != nil {
 			l.Log.Error("failed to get proof status for ID", "id", req.ProverRequestID, "err", err)
+
+			// Record the error for the get proof status call.
+			l.Metr.RecordError("get_proof_status", 1)
 			return err
 		}
-		if status == "PROOF_FULFILLED" {
+		if proofStatus.Status == SP1FulfillmentStatusFulfilled {
 			// Update the proof in the DB and update status to COMPLETE.
 			l.Log.Info("Fulfilled Proof", "id", req.ProverRequestID)
-			err = l.db.AddFulfilledProof(req.ID, proof)
+			err = l.db.AddFulfilledProof(req.ID, proofStatus.Proof)
 			if err != nil {
 				l.Log.Error("failed to update completed proof status", "err", err)
 				return err
@@ -65,21 +50,12 @@ func (l *L2OutputSubmitter) ProcessPendingProofs() error {
 			continue
 		}
 
-		timeout := uint64(time.Now().Unix()) > req.ProofRequestTime+l.DriverSetup.Cfg.ProofTimeout
-		if timeout || status == "PROOF_UNCLAIMED" {
-			if timeout {
-				l.Log.Info("proof timed out", "id", req.ProverRequestID)
-			} else {
-				l.Log.Info("proof unclaimed", "id", req.ProverRequestID)
-			}
-			// update status in db to "FAILED"
-			err = l.db.UpdateProofStatus(req.ID, proofrequest.StatusFAILED)
-			if err != nil {
-				l.Log.Error("failed to update failed proof status", "err", err)
-				return err
-			}
+		if proofStatus.Status == SP1FulfillmentStatusUnfulfillable {
+			// Record the failure reason.
+			l.Log.Info("Proof is unfulfillable", "id", req.ProverRequestID)
+			l.Metr.RecordProveFailure("unfulfillable")
 
-			err = l.RetryRequest(req)
+			err = l.RetryRequest(req, proofStatus)
 			if err != nil {
 				return fmt.Errorf("failed to retry request: %w", err)
 			}
@@ -89,19 +65,52 @@ func (l *L2OutputSubmitter) ProcessPendingProofs() error {
 	return nil
 }
 
-func (l *L2OutputSubmitter) RetryRequest(req *ent.ProofRequest) error {
+// Retry a proof request. Sets the status of a proof to FAILED and retries the proof based on the optional proof status response.
+// If an error response is received:
+// - Range Proof: Split in two if the block range is > 1. Retry the same request if range is 1 block.
+// - Agg Proof: Retry the same request.
+// TODO: Once the reserved strategy adds an execution error, update this to retry only when there's an execution error returned.
+// TODO: With a new allocator, there will not be OOM issues.
+func (l *L2OutputSubmitter) RetryRequest(req *ent.ProofRequest, status ProofStatusResponse) error {
 	err := l.db.UpdateProofStatus(req.ID, proofrequest.StatusFAILED)
 	if err != nil {
 		l.Log.Error("failed to update proof status", "err", err)
 		return err
 	}
 
-	l.Log.Info("Retrying proof", "id", req.ID, "type", req.Type, "start", req.StartBlock, "end", req.EndBlock)
-	// TODO: For range proofs, add custom logic to split the proof into two if the error is an execution error.
-	err = l.db.NewEntry(req.Type, req.StartBlock, req.EndBlock)
-	if err != nil {
-		l.Log.Error("failed to add new proof request", "err", err)
-		return err
+	if req.Type == proofrequest.TypeAGG {
+		l.Log.Info("AGG proof failed, retrying", "id", req.ID)
+		// Retry same request if range is 1 block.
+		err = l.db.NewEntry(req.Type, req.StartBlock, req.EndBlock)
+		if err != nil {
+			l.Log.Error("failed to retry proof request", "err", err)
+			return err
+		}
+	} else {
+		l.Log.Info("SPAN proof failed, retrying", "id", req.ID)
+		// Split the proof in two if range is > 1, otherwise retry same request.
+		if (req.EndBlock-req.StartBlock) > 1 {
+			mid := (req.StartBlock + req.EndBlock) / 2
+			// Create two new proof requests, one from [start, mid] and one from [mid, end]. The requests
+			// are consecutive and overlapping.
+			err = l.db.NewEntry(req.Type, req.StartBlock, mid)
+			if err != nil {
+				l.Log.Error("failed to add first proof request", "err", err)
+				return err
+			}
+			err = l.db.NewEntry(req.Type, mid, req.EndBlock)
+			if err != nil {
+				l.Log.Error("failed to add second proof request", "err", err)
+				return err
+			}
+		} else {
+			// Retry same request if range is 1 block.
+			err = l.db.NewEntry(req.Type, req.StartBlock, req.EndBlock)
+			if err != nil {
+				l.Log.Error("failed to retry proof request", "err", err)
+				return err
+			}
+		}
 	}
 
 	return nil
@@ -143,7 +152,8 @@ func (l *L2OutputSubmitter) RequestQueuedProofs(ctx context.Context) error {
 			return fmt.Errorf("failed to count proving proofs: %w", err)
 		}
 
-		// The number of witness generation requests is capped at MAX_CONCURRENT_WITNESS_GEN.
+		// The number of witness generation requests is capped at MAX_CONCURRENT_WITNESS_GEN. This prevents overloading the machine with processes spawned by the witness generation server.
+		// Once https://github.com/anton-rs/kona/issues/553 is fixed, we may be able to remove this check.
 		if witnessGenProofs >= MAX_CONCURRENT_WITNESS_GEN {
 			l.Log.Info("max witness generation reached, waiting for next cycle")
 			return nil
@@ -158,22 +168,17 @@ func (l *L2OutputSubmitter) RequestQueuedProofs(ctx context.Context) error {
 	go func(p ent.ProofRequest) {
 		l.Log.Info("requesting proof from server", "type", p.Type, "start", p.StartBlock, "end", p.EndBlock, "id", p.ID)
 		// Set the proof status to WITNESSGEN.
-		err = l.db.UpdateProofStatus(nextProofToRequest.ID, proofrequest.StatusWITNESSGEN)
+		err = l.db.UpdateProofStatus(p.ID, proofrequest.StatusWITNESSGEN)
 		if err != nil {
 			l.Log.Error("failed to update proof status", "err", err)
 			return
 		}
 
-		err = l.RequestOPSuccinctProof(p)
+		// Request the type of proof depending on the mock configuration.
+		err = l.RequestProof(p, l.Cfg.Mock)
 		if err != nil {
-			l.Log.Error("failed to request proof from the OP Succinct server", "err", err, "proof", p)
-			err = l.db.UpdateProofStatus(nextProofToRequest.ID, proofrequest.StatusFAILED)
-			if err != nil {
-				l.Log.Error("failed to set proof status to failed", "err", err, "proverRequestID", nextProofToRequest.ID)
-			}
-
 			// If the proof fails to be requested, we should add it to the queue to be retried.
-			err = l.RetryRequest(nextProofToRequest)
+			err = l.RetryRequest(nextProofToRequest, ProofStatusResponse{})
 			if err != nil {
 				l.Log.Error("failed to retry request", "err", err)
 			}
@@ -199,7 +204,6 @@ func (l *L2OutputSubmitter) DeriveAggProofs(ctx context.Context) error {
 		return fmt.Errorf("failed to get next L2OO output: %w", err)
 	}
 
-	l.Log.Info("Checking for AGG proof", "blocksToProve", minTo.Uint64()-latest.Uint64(), "latestProvenBlock", latest.Uint64(), "minBlockToProveToAgg", minTo.Uint64())
 	created, end, err := l.db.TryCreateAggProofFromSpanProofs(latest.Uint64(), minTo.Uint64())
 	if err != nil {
 		return fmt.Errorf("failed to create agg proof from span proofs: %w", err)
@@ -211,24 +215,63 @@ func (l *L2OutputSubmitter) DeriveAggProofs(ctx context.Context) error {
 	return nil
 }
 
-// Request a proof from the OP Succinct server.
-func (l *L2OutputSubmitter) RequestOPSuccinctProof(p ent.ProofRequest) error {
-	var proofId string
-	var err error
+func (l *L2OutputSubmitter) prepareProofRequest(p ent.ProofRequest) ([]byte, error) {
+	if p.Type == proofrequest.TypeSPAN {
+		if p.StartBlock >= p.EndBlock {
+			return nil, fmt.Errorf("l2Start must be less than l2End")
+		}
 
-	// TODO: This process should poll the server to get the witness generation status.
-	if p.Type == proofrequest.TypeAGG {
-		proofId, err = l.RequestAggProof(p.StartBlock, p.EndBlock, p.L1BlockHash)
-		if err != nil {
-			return fmt.Errorf("failed to request AGG proof: %w", err)
+		requestBody := SpanProofRequest{
+			Start: p.StartBlock,
+			End:   p.EndBlock,
 		}
-	} else if p.Type == proofrequest.TypeSPAN {
-		proofId, err = l.RequestSpanProof(p.StartBlock, p.EndBlock)
+		jsonBody, err := json.Marshal(requestBody)
 		if err != nil {
-			return fmt.Errorf("failed to request SPAN proof: %w", err)
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
 		}
+		return jsonBody, nil
 	} else {
-		return fmt.Errorf("unknown proof type: %s", p.Type)
+		subproofs, err := l.db.GetConsecutiveSpanProofs(p.StartBlock, p.EndBlock)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get subproofs: %w", err)
+		}
+		requestBody := AggProofRequest{
+			Subproofs: subproofs,
+			L1Head:    p.L1BlockHash,
+		}
+		jsonBody, err := json.Marshal(requestBody)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+		return jsonBody, nil
+	}
+}
+
+// RequestProof handles both mock and real proof requests
+func (l *L2OutputSubmitter) RequestProof(p ent.ProofRequest, isMock bool) error {
+	jsonBody, err := l.prepareProofRequest(p)
+	if err != nil {
+		return err
+	}
+
+	if isMock {
+		proofData, err := l.requestMockProof(p.Type, jsonBody)
+		if err != nil {
+			return fmt.Errorf("mock proof request failed: %w", err)
+		}
+
+		// For mock proofs, once the "mock proof" has been generated, set the status to PROVING. AddFulfilledProof expects the proof to be in the PROVING status.
+		err = l.db.UpdateProofStatus(p.ID, proofrequest.StatusPROVING)
+		if err != nil {
+			return fmt.Errorf("failed to set proof status to proving: %w", err)
+		}
+		return l.db.AddFulfilledProof(p.ID, proofData)
+	}
+
+	// Request a real proof from the witness generation server. Returns the proof ID from the network.
+	proofID, err := l.requestRealProof(p.Type, jsonBody)
+	if err != nil {
+		return fmt.Errorf("real proof request failed: %w", err)
 	}
 
 	// Set the proof status to PROVING once the prover ID has been retrieved. Only proofs with status PROVING, SUCCESS or FAILED have a prover request ID.
@@ -237,109 +280,86 @@ func (l *L2OutputSubmitter) RequestOPSuccinctProof(p ent.ProofRequest) error {
 		return fmt.Errorf("failed to set proof status to proving: %w", err)
 	}
 
-	err = l.db.SetProverRequestID(p.ID, proofId)
-	if err != nil {
-		return fmt.Errorf("failed to set prover request ID: %w", err)
-	}
-
-	return nil
+	return l.db.SetProverRequestID(p.ID, proofID)
 }
 
-// Request a span proof for the range [l2Start, l2End].
-func (l *L2OutputSubmitter) RequestSpanProof(l2Start, l2End uint64) (string, error) {
-	if l2Start >= l2End {
-		return "", fmt.Errorf("l2Start must be less than l2End")
-	}
-
-	l.Log.Info("requesting span proof", "start", l2Start, "end", l2End)
-	requestBody := SpanProofRequest{
-		Start: l2Start,
-		End:   l2End,
-	}
-	jsonBody, err := json.Marshal(requestBody)
+func (l *L2OutputSubmitter) requestRealProof(proofType proofrequest.Type, jsonBody []byte) ([]byte, error) {
+	resp, err := l.makeProofRequest(proofType, jsonBody)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request body: %w", err)
+		return nil, err
 	}
 
-	return l.RequestProofFromServer(proofrequest.TypeSPAN, jsonBody)
-}
-
-// Request an aggregate proof for the range [start, end]. If there is not a consecutive set of span proofs,
-// which cover the range, the request will error.
-func (l *L2OutputSubmitter) RequestAggProof(start, end uint64, l1BlockHash string) (string, error) {
-	l.Log.Info("requesting agg proof", "start", start, "end", end)
-
-	// Query the DB for the consecutive span proofs that cover the range [start, end].
-	subproofs, err := l.db.GetConsecutiveSpanProofs(start, end)
-	if err != nil {
-		return "", fmt.Errorf("failed to get subproofs: %w", err)
-	}
-	requestBody := AggProofRequest{
-		Subproofs: subproofs,
-		L1Head:    l1BlockHash,
-	}
-	jsonBody, err := json.Marshal(requestBody)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal request body: %w", err)
-	}
-
-	// Request the agg proof from the server.
-	return l.RequestProofFromServer(proofrequest.TypeAGG, jsonBody)
-}
-
-// Request a proof from the OP Succinct server, given the path and the body of the request. Returns
-// the proof ID on a successful request.
-func (l *L2OutputSubmitter) RequestProofFromServer(proofType proofrequest.Type, jsonBody []byte) (string, error) {
-	var urlPath string
-	if proofType == proofrequest.TypeAGG {
-		urlPath = "request_agg_proof"
-	} else if proofType == proofrequest.TypeSPAN {
-		urlPath = "request_span_proof"
-	}
-	req, err := http.NewRequest("POST", l.Cfg.OPSuccinctServerUrl+"/"+urlPath, bytes.NewBuffer(jsonBody))
-	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	/// The witness generation for larger proofs can take up to ~10 minutes for large ranges.
-	// TODO: In the future, we can poll the server for the witness generation status.
-	client := &http.Client{
-		Timeout: WITNESS_GEN_TIMEOUT,
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			return "", fmt.Errorf("request timed out after %s: %w", WITNESS_GEN_TIMEOUT, err)
-		}
-		return "", fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// Read the response body.
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("error reading the response body: %v", err)
-	}
-
-	// Create a variable of the Response type.
-	var response ProofResponse
-
-	// Unmarshal the JSON into the response variable.
-	err = json.Unmarshal(body, &response)
-	if err != nil {
-		return "", fmt.Errorf("error decoding JSON response: %v", err)
+	var response WitnessGenerationResponse
+	if err := json.Unmarshal(resp, &response); err != nil {
+		return nil, fmt.Errorf("error decoding JSON response: %w", err)
 	}
 	l.Log.Info("successfully submitted proof", "proofID", response.ProofID)
-
 	return response.ProofID, nil
 }
 
+// Request a mock proof from the witness generation server.
+func (l *L2OutputSubmitter) requestMockProof(proofType proofrequest.Type, jsonBody []byte) ([]byte, error) {
+	resp, err := l.makeProofRequest(proofType, jsonBody)
+	if err != nil {
+		return nil, err
+	}
+
+	var response ProofStatusResponse
+	if err := json.Unmarshal(resp, &response); err != nil {
+		return nil, fmt.Errorf("error decoding JSON response: %w", err)
+	}
+
+	return response.Proof, nil
+}
+
+// Make a proof request to the witness generation server for the correct proof type.
+func (l *L2OutputSubmitter) makeProofRequest(proofType proofrequest.Type, jsonBody []byte) ([]byte, error) {
+	urlPath := l.getProofEndpoint(proofType)
+	req, err := http.NewRequest("POST", l.Cfg.OPSuccinctServerUrl+"/"+urlPath, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: WITNESS_GEN_TIMEOUT}
+	resp, err := client.Do(req)
+	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			l.Log.Error("Witness generation request timed out", "err", err)
+			l.Metr.RecordWitnessGenFailure("Timeout")
+			return nil, fmt.Errorf("request timed out after %s: %w", WITNESS_GEN_TIMEOUT, err)
+		}
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		l.Log.Error("Witness generation request failed", "status", resp.StatusCode, "body", resp.Body)
+		l.Metr.RecordWitnessGenFailure("Failed")
+		return nil, fmt.Errorf("received non-200 status code: %d", resp.StatusCode)
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+func (l *L2OutputSubmitter) getProofEndpoint(proofType proofrequest.Type) string {
+	switch {
+	case proofType == proofrequest.TypeAGG && l.Cfg.Mock:
+		return "request_mock_agg_proof"
+	case proofType == proofrequest.TypeAGG:
+		return "request_agg_proof"
+	case l.Cfg.Mock:
+		return "request_mock_span_proof"
+	default:
+		return "request_span_proof"
+	}
+}
+
 // Get the status of a proof given its ID.
-func (l *L2OutputSubmitter) GetProofStatus(proofId string) (string, []byte, error) {
+func (l *L2OutputSubmitter) GetProofStatus(proofId string) (ProofStatusResponse, error) {
 	req, err := http.NewRequest("GET", l.Cfg.OPSuccinctServerUrl+"/status/"+proofId, nil)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to create request: %w", err)
+		return ProofStatusResponse{}, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	client := &http.Client{
@@ -348,28 +368,33 @@ func (l *L2OutputSubmitter) GetProofStatus(proofId string) (string, []byte, erro
 	resp, err := client.Do(req)
 	if err != nil {
 		if err, ok := err.(net.Error); ok && err.Timeout() {
-			return "", nil, fmt.Errorf("request timed out after %s: %w", PROOF_STATUS_TIMEOUT, err)
+			return ProofStatusResponse{}, fmt.Errorf("request timed out after %s: %w", PROOF_STATUS_TIMEOUT, err)
 		}
-		return "", nil, fmt.Errorf("failed to send request: %w", err)
+		return ProofStatusResponse{}, fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// If the response status code is not 200, return an error.
+	if resp.StatusCode != http.StatusOK {
+		return ProofStatusResponse{}, fmt.Errorf("received non-200 status code: %d", resp.StatusCode)
+	}
 
 	// Read the response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", nil, fmt.Errorf("error reading the response body: %v", err)
+		return ProofStatusResponse{}, fmt.Errorf("error reading the response body: %v", err)
 	}
 
 	// Create a variable of the Response type
-	var response ProofStatus
+	var proofStatus ProofStatusResponse
 
 	// Unmarshal the JSON into the response variable
-	err = json.Unmarshal(body, &response)
+	err = json.Unmarshal(body, &proofStatus)
 	if err != nil {
-		return "", nil, fmt.Errorf("error decoding JSON response: %v", err)
+		return ProofStatusResponse{}, fmt.Errorf("error decoding JSON response: %v", err)
 	}
 
-	return response.Status, response.Proof, nil
+	return proofStatus, nil
 }
 
 // Validate the contract's configuration of the aggregation and range verification keys as well
@@ -393,12 +418,30 @@ func (l *L2OutputSubmitter) ValidateConfig(address string) error {
 	client := &http.Client{
 		Timeout: PROOF_STATUS_TIMEOUT,
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		if err, ok := err.(net.Error); ok && err.Timeout() {
-			return fmt.Errorf("request timed out after %s: %w", PROOF_STATUS_TIMEOUT, err)
+
+	// Attempt to validate the config up to 5 times with exponential backoff.
+	maxRetries := 5
+	backoff := 1 * time.Second
+	var resp *http.Response
+
+	for i := 0; i < maxRetries; i++ {
+		resp, err = client.Do(req)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			break
 		}
-		return fmt.Errorf("failed to send request: %w", err)
+		if i == maxRetries-1 {
+			if err != nil {
+				if err, ok := err.(net.Error); ok && err.Timeout() {
+					return fmt.Errorf("request timed out after %s: %w", PROOF_STATUS_TIMEOUT, err)
+				}
+				return fmt.Errorf("failed to send request: %w", err)
+			}
+			return fmt.Errorf("server not healthy after %d retries", maxRetries)
+		}
+
+		l.Log.Info("server not ready, retrying", "attempt", i+1, "backoff", backoff)
+		time.Sleep(backoff)
+		backoff *= 2
 	}
 	defer resp.Body.Close()
 
