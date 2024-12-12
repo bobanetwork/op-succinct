@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use op_succinct_host_utils::{
-    fetcher::{CacheMode, OPSuccinctDataFetcher},
+    fetcher::{CacheMode, OPSuccinctDataFetcher, RunContext},
     get_proof_stdin,
     stats::ExecutionStats,
     witnessgen::WitnessGenExecutor,
@@ -26,16 +26,21 @@ struct Args {
     /// Generate proof.
     #[arg(short, long)]
     prove: bool,
+
+    /// Environment file.
+    #[arg(short, long, default_value = ".env")]
+    env_file: String,
 }
 
 /// Execute the OP Succinct program for a single block.
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenv::dotenv().ok();
     let args = Args::parse();
+    dotenv::from_path(&args.env_file)?;
     utils::setup_logger();
 
-    let data_fetcher = OPSuccinctDataFetcher::default();
+    let data_fetcher = OPSuccinctDataFetcher::new_with_rollup_config(RunContext::Dev).await?;
+
     let l2_chain_id = data_fetcher.get_l2_chain_id().await?;
 
     let l2_safe_head = args.l2_block - 1;
@@ -58,7 +63,7 @@ async fn main() -> Result<()> {
         witnessgen_executor.spawn_witnessgen(&host_cli).await?;
         witnessgen_executor.flush().await?;
     }
-    let witness_generation_time_sec = start_time.elapsed().as_secs();
+    let witness_generation_time_sec = start_time.elapsed();
     // Get the stdin for the block.
     let sp1_stdin = get_proof_stdin(&host_cli)?;
 
@@ -95,13 +100,16 @@ async fn main() -> Result<()> {
             std::fs::create_dir_all(&report_dir)?;
         }
 
-        let mut stats = ExecutionStats::default();
-        stats
-            .add_block_data(&data_fetcher, args.l2_block, args.l2_block)
-            .await;
-        stats.add_report_data(&report);
-        stats.add_aggregate_data();
-        stats.add_timing_data(execution_duration.as_secs(), witness_generation_time_sec);
+        let block_data = data_fetcher
+            .get_l2_block_data_range(args.l2_block, args.l2_block)
+            .await?;
+
+        let stats = ExecutionStats::new(
+            &block_data,
+            &report,
+            witness_generation_time_sec.as_secs(),
+            execution_duration.as_secs(),
+        );
         println!("Execution Stats: \n{:?}", stats);
 
         // Write to CSV.

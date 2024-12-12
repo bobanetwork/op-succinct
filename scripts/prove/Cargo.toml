@@ -30,6 +30,9 @@ dotenv.workspace = true
 num-format.workspace = true
 csv.workspace = true
 
+# kona
+kona-host = { workspace = true }
+
 # local
 op-succinct-host-utils.workspace = true
 op-succinct-client-utils.workspace = true
@@ -37,8 +40,16 @@ op-succinct-client-utils.workspace = true
 # op-alloy
 op-alloy-genesis.workspace = true
 
+# alloy
+alloy-primitives = { workspace = true }
+alloy-eips = { workspace = true }
+
 # sp1
 sp1-sdk = { workspace = true }
+
+[dev-dependencies]
+reqwest = { version = "0.12.4", features = ["json"] }
+serde_json = { workspace = true }
 
 [build-dependencies]
 op-succinct-build-utils.workspace = true

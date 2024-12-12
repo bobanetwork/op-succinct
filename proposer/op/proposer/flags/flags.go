@@ -94,6 +94,7 @@ var (
 	ProofTimeoutFlag = &cli.Uint64Flag{
 		Name:    "proof-timeout",
 		Usage:   "Maximum time in seconds to spend generating a proof before giving up",
+		// If a proof takes more than 4 hours, assume the cluster failed to set it to failed state.
 		Value:   14400,
 		EnvVars: prefixEnvVars("MAX_PROOF_TIME"),
 	}
@@ -125,6 +126,12 @@ var (
 		Usage:   "Batch Sender Address",
 		EnvVars: prefixEnvVars("BATCHER_ADDRESS"),
 	}
+	MockFlag = &cli.BoolFlag{
+		Name:    "mock",
+		Usage:   "Use the mock OP Succinct server",
+		Value:   false,
+		EnvVars: prefixEnvVars("OP_SUCCINCT_MOCK"),
+	}
 
 	// Legacy Flags
 	L2OutputHDPathFlag = txmgr.L2OutputHDPathFlag
@@ -153,6 +160,7 @@ var optionalFlags = []cli.Flag{
 	MaxConcurrentProofRequestsFlag,
 	BatchInboxFlag,
 	BatcherAddressFlag,
+	MockFlag,
 }
 
 func init() {

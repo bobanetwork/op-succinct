@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ethereum-optimism/optimism/op-proposer/metrics"
 	"github.com/ethereum-optimism/optimism/op-proposer/proposer/rpc"
 	opservice "github.com/ethereum-optimism/optimism/op-service"
 	"github.com/ethereum-optimism/optimism/op-service/cliapp"
@@ -23,6 +22,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/log"
+
+	opsuccinctmetrics "github.com/succinctlabs/op-succinct-go/proposer/metrics"
 )
 
 var ErrAlreadyStopped = errors.New("already stopped")
@@ -55,6 +56,7 @@ type ProposerConfig struct {
 	UseCachedDb                bool
 	SlackToken                 string
 	BeaconRpc                  string
+	RollupRpc                  string
 	TxCacheOutDir              string
 	MaxBlockRangePerSpanProof  uint64
 	L2ChainID                  uint64
@@ -63,11 +65,12 @@ type ProposerConfig struct {
 	MaxConcurrentProofRequests uint64
 	BatchInbox                 common.Address
 	BatcherAddress             common.Address
+	Mock                       bool
 }
 
 type ProposerService struct {
 	Log     log.Logger
-	Metrics metrics.Metricer
+	Metrics opsuccinctmetrics.OPSuccinctMetricer
 
 	ProposerConfig
 
@@ -116,6 +119,7 @@ func (ps *ProposerService) initFromCLIConfig(ctx context.Context, version string
 	ps.UseCachedDb = cfg.UseCachedDb
 	ps.SlackToken = cfg.SlackToken
 	ps.BeaconRpc = cfg.BeaconRpc
+	ps.RollupRpc = cfg.RollupRpc
 	ps.TxCacheOutDir = cfg.TxCacheOutDir
 	ps.MaxBlockRangePerSpanProof = cfg.MaxBlockRangePerSpanProof
 	ps.OPSuccinctServerUrl = cfg.OPSuccinctServerUrl
@@ -124,6 +128,7 @@ func (ps *ProposerService) initFromCLIConfig(ctx context.Context, version string
 	ps.MaxConcurrentProofRequests = cfg.MaxConcurrentProofRequests
 	ps.BatchInbox = common.HexToAddress(cfg.BatchInbox)
 	ps.BatcherAddress = common.HexToAddress(cfg.BatcherAddress)
+	ps.Mock = cfg.Mock
 
 	ps.initL2ooAddress(cfg)
 
@@ -176,9 +181,9 @@ func (ps *ProposerService) initRPCClients(ctx context.Context, cfg *CLIConfig) e
 func (ps *ProposerService) initMetrics(cfg *CLIConfig) {
 	if cfg.MetricsConfig.Enabled {
 		procName := "default"
-		ps.Metrics = metrics.NewMetrics(procName)
+		ps.Metrics = opsuccinctmetrics.NewMetrics(procName)
 	} else {
-		ps.Metrics = metrics.NoopMetrics
+		ps.Metrics = opsuccinctmetrics.NoopMetrics
 	}
 }
 

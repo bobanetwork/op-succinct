@@ -22,41 +22,37 @@ contract Utils is Test, JSONDecoder {
     {
         // Require that the verifier gateway is deployed
         require(
-            address(cfg.verifierGateway).code.length > 0,
-            "OPSuccinctL2OutputOracleUpgrader: verifier gateway not deployed"
+            address(cfg.verifier).code.length > 0, "OPSuccinctL2OutputOracleUpgrader: verifier gateway not deployed"
         );
 
         OPSuccinctL2OutputOracle.InitParams memory initParams = OPSuccinctL2OutputOracle.InitParams({
-            verifierGateway: cfg.verifierGateway,
+            verifier: cfg.verifier,
             aggregationVkey: cfg.aggregationVkey,
             rangeVkeyCommitment: cfg.rangeVkeyCommitment,
             startingOutputRoot: cfg.startingOutputRoot,
-            rollupConfigHash: cfg.rollupConfigHash
+            rollupConfigHash: cfg.rollupConfigHash,
+            proposer: cfg.proposer,
+            challenger: cfg.challenger,
+            owner: cfg.owner,
+            finalizationPeriodSeconds: cfg.finalizationPeriod,
+            l2BlockTime: cfg.l2BlockTime,
+            startingBlockNumber: cfg.startingBlockNumber,
+            startingTimestamp: cfg.startingTimestamp,
+            submissionInterval: cfg.submissionInterval
         });
 
-        bytes memory initializationParams = abi.encodeWithSelector(
-            OPSuccinctL2OutputOracle.initialize.selector,
-            cfg.submissionInterval,
-            cfg.l2BlockTime,
-            cfg.startingBlockNumber,
-            cfg.startingTimestamp,
-            cfg.proposer,
-            cfg.challenger,
-            cfg.finalizationPeriod,
-            initParams
-        );
+        bytes memory initializationParams =
+            abi.encodeWithSelector(OPSuccinctL2OutputOracle.initialize.selector, initParams);
 
         if (executeUpgradeCall) {
             Proxy existingProxy = Proxy(payable(l2OutputOracleProxy));
             existingProxy.upgradeToAndCall(impl, initializationParams);
         } else {
             // Raw calldata for an upgrade call by a multisig.
-            bytes memory multisigCalldata = abi.encodeWithSelector(Proxy.upgradeTo.selector, impl);
-            console.log("Upgrade calldata:");
+            bytes memory multisigCalldata =
+                abi.encodeWithSelector(Proxy.upgradeToAndCall.selector, impl, initializationParams);
+            console.log("The calldata for upgrading the contract with the new initialization parameters is:");
             console.logBytes(multisigCalldata);
-
-            console.log("Update contract parameter calldata:");
-            console.logBytes(initializationParams);
         }
     }
 
@@ -67,36 +63,5 @@ contract Utils is Test, JSONDecoder {
         string memory json = vm.readFile(path);
         bytes memory data = vm.parseJson(json);
         return abi.decode(data, (Config));
-    }
-
-    // This script updates the rollup config hash and the block number in the config.
-    function updateRollupConfig() public {
-        // If ENV_FILE is set, pass it to the fetch-rollup-config binary.
-        string memory envFile = vm.envOr("ENV_FILE", string(".env"));
-
-        // Build the fetch-rollup-config binary. Use the quiet flag to suppress build output.
-        string[] memory inputs = new string[](6);
-        inputs[0] = "cargo";
-        inputs[1] = "build";
-        inputs[2] = "--bin";
-        inputs[3] = "fetch-rollup-config";
-        inputs[4] = "--release";
-        inputs[5] = "--quiet";
-        vm.ffi(inputs);
-
-        // Run the fetch-rollup-config binary which updates the rollup config hash and the block number in the config.
-        // Use the quiet flag to suppress build output.
-        string[] memory inputs2 = new string[](9);
-        inputs2[0] = "cargo";
-        inputs2[1] = "run";
-        inputs2[2] = "--bin";
-        inputs2[3] = "fetch-rollup-config";
-        inputs2[4] = "--release";
-        inputs2[5] = "--quiet";
-        inputs2[6] = "--";
-        inputs2[7] = "--env-file";
-        inputs2[8] = envFile;
-
-        vm.ffi(inputs2);
     }
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	_ "net/http/pprof"
+	"sort"
 	"sync"
 	"time"
 
@@ -20,15 +21,15 @@ import (
 
 	// Original Optimism Bindings
 
-	// OP Succinct Contract Bindings
-	opsuccinctbindings "github.com/succinctlabs/op-succinct-go/bindings"
-
-	"github.com/ethereum-optimism/optimism/op-proposer/metrics"
 	"github.com/ethereum-optimism/optimism/op-service/dial"
 	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/txmgr"
+
+	// OP Succinct
+	opsuccinctbindings "github.com/succinctlabs/op-succinct-go/bindings"
 	"github.com/succinctlabs/op-succinct-go/proposer/db"
 	"github.com/succinctlabs/op-succinct-go/proposer/db/ent/proofrequest"
+	opsuccinctmetrics "github.com/succinctlabs/op-succinct-go/proposer/metrics"
 )
 
 var (
@@ -65,7 +66,7 @@ type RollupClient interface {
 
 type DriverSetup struct {
 	Log      log.Logger
-	Metr     metrics.Metricer
+	Metr     opsuccinctmetrics.OPSuccinctMetricer
 	Cfg      ProposerConfig
 	Txmgr    txmgr.TxManager
 	L1Client *ethclient.Client
@@ -169,7 +170,7 @@ func (l *L2OutputSubmitter) StartL2OutputSubmitting() error {
 		return fmt.Errorf("failed to get witness generation pending proofs: %w", err)
 	}
 	for _, req := range witnessGenReqs {
-		err = l.RetryRequest(req)
+		err = l.RetryRequest(req, ProofStatusResponse{})
 		if err != nil {
 			return fmt.Errorf("failed to retry request: %w", err)
 		}
@@ -222,28 +223,17 @@ func (l *L2OutputSubmitter) StopL2OutputSubmitting() error {
 	return nil
 }
 
-// ProposerMetrics contains relevant statistics for the proposer.
-type ProposerMetrics struct {
-	L2UnsafeHeadBlock              uint64
-	L2FinalizedBlock               uint64
-	LatestContractL2Block          uint64
-	HighestProvenContiguousL2Block uint64
-	NumProving                     uint64
-	NumWitnessgen                  uint64
-	NumUnrequested                 uint64
-}
-
 // GetProposerMetrics gets the performance metrics for the proposer.
 // TODO: Add a metric for the latest proven transaction.
-func (l *L2OutputSubmitter) GetProposerMetrics(ctx context.Context) (ProposerMetrics, error) {
+func (l *L2OutputSubmitter) GetProposerMetrics(ctx context.Context) (opsuccinctmetrics.ProposerMetrics, error) {
 	rollupClient, err := l.RollupProvider.RollupClient(ctx)
 	if err != nil {
-		return ProposerMetrics{}, fmt.Errorf("getting rollup client: %w", err)
+		return opsuccinctmetrics.ProposerMetrics{}, fmt.Errorf("getting rollup client: %w", err)
 	}
 
 	status, err := rollupClient.SyncStatus(ctx)
 	if err != nil {
-		return ProposerMetrics{}, fmt.Errorf("getting sync status: %w", err)
+		return opsuccinctmetrics.ProposerMetrics{}, fmt.Errorf("getting sync status: %w", err)
 	}
 
 	// The unsafe head block on L2.
@@ -253,43 +243,57 @@ func (l *L2OutputSubmitter) GetProposerMetrics(ctx context.Context) (ProposerMet
 	// The latest block number on the L2OO contract.
 	latestContractL2Block, err := l.l2ooContract.LatestBlockNumber(&bind.CallOpts{Context: ctx})
 	if err != nil {
-		return ProposerMetrics{}, fmt.Errorf("failed to get latest output index: %w", err)
+		return opsuccinctmetrics.ProposerMetrics{}, fmt.Errorf("failed to get latest output index: %w", err)
 	}
 
 	// Get the highest proven L2 block contiguous with the contract's latest block.
 	highestProvenContiguousL2Block, err := l.db.GetMaxContiguousSpanProofRange(latestContractL2Block.Uint64())
 	if err != nil {
-		return ProposerMetrics{}, fmt.Errorf("failed to get max contiguous span proof range: %w", err)
+		return opsuccinctmetrics.ProposerMetrics{}, fmt.Errorf("failed to get max contiguous span proof range: %w", err)
+	}
+
+	// This fetches the next block number, which is the currentBlock + submissionInterval.
+	minBlockToProveToAgg, err := l.l2ooContract.NextBlockNumber(&bind.CallOpts{Context: ctx})
+	if err != nil {
+		return opsuccinctmetrics.ProposerMetrics{}, fmt.Errorf("failed to get next L2OO output: %w", err)
 	}
 
 	numProving, err := l.db.GetNumberOfRequestsWithStatuses(proofrequest.StatusPROVING)
 	if err != nil {
-		return ProposerMetrics{}, fmt.Errorf("failed to get number of proofs proving: %w", err)
+		return opsuccinctmetrics.ProposerMetrics{}, fmt.Errorf("failed to get number of proofs proving: %w", err)
 	}
 
 	numWitnessgen, err := l.db.GetNumberOfRequestsWithStatuses(proofrequest.StatusWITNESSGEN)
 	if err != nil {
-		return ProposerMetrics{}, fmt.Errorf("failed to get number of proofs witnessgen: %w", err)
+		return opsuccinctmetrics.ProposerMetrics{}, fmt.Errorf("failed to get number of proofs witnessgen: %w", err)
 	}
 
 	numUnrequested, err := l.db.GetNumberOfRequestsWithStatuses(proofrequest.StatusUNREQ)
 	if err != nil {
-		return ProposerMetrics{}, fmt.Errorf("failed to get number of unrequested proofs: %w", err)
+		return opsuccinctmetrics.ProposerMetrics{}, fmt.Errorf("failed to get number of unrequested proofs: %w", err)
 	}
 
-	return ProposerMetrics{
+	metrics := opsuccinctmetrics.ProposerMetrics{
 		L2UnsafeHeadBlock:              l2UnsafeHeadBlock,
 		L2FinalizedBlock:               l2FinalizedBlock,
 		LatestContractL2Block:          latestContractL2Block.Uint64(),
 		HighestProvenContiguousL2Block: highestProvenContiguousL2Block,
+		MinBlockToProveToAgg:           minBlockToProveToAgg.Uint64(),
 		NumProving:                     uint64(numProving),
 		NumWitnessgen:                  uint64(numWitnessgen),
 		NumUnrequested:                 uint64(numUnrequested),
-	}, nil
+	}
+
+	// Record the metrics
+	if m, ok := l.Metr.(*opsuccinctmetrics.OPSuccinctMetrics); ok {
+		m.RecordProposerStatus(metrics)
+	}
+
+	return metrics, nil
 }
 
 // SendSlackNotification sends a Slack notification with the proposer metrics.
-func (l *L2OutputSubmitter) SendSlackNotification(proposerMetrics ProposerMetrics) error {
+func (l *L2OutputSubmitter) SendSlackNotification(proposerMetrics opsuccinctmetrics.ProposerMetrics) error {
 	if l.Cfg.SlackToken == "" {
 		l.Log.Info("Slack notifications disabled, token not set")
 		return nil // Slack notifications disabled if token not set
@@ -316,8 +320,8 @@ func (l *L2OutputSubmitter) SendSlackNotification(proposerMetrics ProposerMetric
 
 	message := fmt.Sprintf("*Chain %d Proposer Metrics*:\n"+
 		"Contract is %d minutes behind L2 Finalized\n"+
-		"| L2 Unsafe | L2 Finalized | Contract L2 | Proven L2 |\n"+
-		"| %-9d | %-12d | %-11d | %-9d |\n"+
+		"| L2 Unsafe | L2 Finalized | Contract L2 | Proven L2 | Min to Agg |\n"+
+		"| %-9d | %-12d | %-11d | %-9d | %-9d |\n"+
 		"| Proving   | Witness Gen | Unrequested |\n"+
 		"| %-9d | %-11d | %-11d |",
 		l.Cfg.L2ChainID,
@@ -326,6 +330,7 @@ func (l *L2OutputSubmitter) SendSlackNotification(proposerMetrics ProposerMetric
 		proposerMetrics.L2FinalizedBlock,
 		proposerMetrics.LatestContractL2Block,
 		proposerMetrics.HighestProvenContiguousL2Block,
+		proposerMetrics.MinBlockToProveToAgg,
 		proposerMetrics.NumProving,
 		proposerMetrics.NumWitnessgen,
 		proposerMetrics.NumUnrequested)
@@ -358,14 +363,20 @@ func (l *L2OutputSubmitter) SubmitAggProofs(ctx context.Context) error {
 		return nil
 	}
 
-	for _, aggProof := range completedAggProofs {
-		output, err := l.FetchOutput(ctx, aggProof.EndBlock)
-		if err != nil {
-			return fmt.Errorf("failed to fetch output at block %d: %w", aggProof.EndBlock, err)
-		}
+	// Select the agg proof with the highest L2 block number.
+	sort.Slice(completedAggProofs, func(i, j int) bool {
+		return completedAggProofs[i].EndBlock > completedAggProofs[j].EndBlock
+	})
 
-		l.proposeOutput(ctx, output, aggProof.Proof, aggProof.L1BlockNumber)
-		l.Log.Info("AGG proof submitted on-chain", "start", aggProof.StartBlock, "end", aggProof.EndBlock)
+	// Submit the agg proof with the highest L2 block number.
+	aggProof := completedAggProofs[0]
+	output, err := l.FetchOutput(ctx, aggProof.EndBlock)
+	if err != nil {
+		return fmt.Errorf("failed to fetch output at block %d: %w", aggProof.EndBlock, err)
+	}
+	err = l.proposeOutput(ctx, output, aggProof.Proof, aggProof.L1BlockNumber)
+	if err != nil {
+		return fmt.Errorf("failed to propose output: %w", err)
 	}
 
 	return nil
@@ -619,12 +630,12 @@ func (l *L2OutputSubmitter) loopL2OO(ctx context.Context) {
 			}
 			l.Log.Info("Proposer status", "metrics", metrics)
 
-			// 1) Queue up the span proofs that are ready to prove. Determine these range proofs based on the latest L2 finalized block,
+			// 1) Queue up the range proofs that are ready to prove. Determine these range proofs based on the latest L2 finalized block,
 			// and the current L2 unsafe head.
-			l.Log.Info("Stage 1: Deriving Span Batches...")
-			err = l.DeriveNewSpanBatches(ctx)
+			l.Log.Info("Stage 1: Getting Range Proof Boundaries...")
+			err = l.GetRangeProofBoundaries(ctx)
 			if err != nil {
-				l.Log.Error("failed to add next span batches to db", "err", err)
+				l.Log.Error("failed to get range proof boundaries", "err", err)
 				continue
 			}
 
@@ -681,21 +692,34 @@ func (l *L2OutputSubmitter) loopL2OO(ctx context.Context) {
 	}
 }
 
-func (l *L2OutputSubmitter) proposeOutput(ctx context.Context, output *eth.OutputResponse, proof []byte, l1BlockNum uint64) {
+func (l *L2OutputSubmitter) proposeOutput(ctx context.Context, output *eth.OutputResponse, proof []byte, l1BlockNum uint64) error {
 	cCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
+
+	// Get the current nextBlockNumber from the L2OO contract.
+	nextBlockNumber, err := l.l2ooContract.NextBlockNumber(&bind.CallOpts{Context: cCtx})
+	if err != nil {
+		l.Log.Error("Failed to get nextBlockNumber", "err", err)
+		return err
+	}
 
 	if err := l.sendTransaction(cCtx, output, proof, l1BlockNum); err != nil {
 		l.Log.Error("Failed to send proposal transaction",
 			"err", err,
+			"expected_next_blocknum", nextBlockNumber.Uint64(),
+			"l2blocknum", output.BlockRef.Number,
 			"l1blocknum", l1BlockNum,
 			"l1head", output.Status.HeadL1.Number,
 			"proof", proof)
-		return
+		return err
 	}
+	l.Log.Info("AGG proof submitted on-chain", "end", output.BlockRef.Number)
 	l.Metr.RecordL2BlocksProposed(output.BlockRef)
+	return nil
 }
 
+// checkpointBlockHash gets the current L1 head, and then sends a transaction to checkpoint the blockhash on
+// the L2OO contract for the aggregation proof.
 func (l *L2OutputSubmitter) checkpointBlockHash(ctx context.Context) (uint64, common.Hash, error) {
 	cCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
