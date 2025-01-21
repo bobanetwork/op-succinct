@@ -91,6 +91,8 @@ type L2OutputSubmitter struct {
 	l2ooContract L2OOContract
 	l2ooABI      *abi.ABI
 
+	dgfABI *abi.ABI
+
 	db db.ProofDB
 }
 
@@ -129,7 +131,13 @@ func newL2OOSubmitter(ctx context.Context, cancel context.CancelFunc, setup Driv
 	}
 	log.Info("Connected to L2OutputOracle", "address", setup.Cfg.L2OutputOracleAddr, "version", version)
 
-	parsed, err := opsuccinctbindings.OPSuccinctL2OutputOracleMetaData.GetAbi()
+	l2ooAbiParsed, err := opsuccinctbindings.OPSuccinctL2OutputOracleMetaData.GetAbi()
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+
+	dfgAbiParsed, err := opsuccinctbindings.OPSuccinctDisputeGameFactoryMetaData.GetAbi()
 	if err != nil {
 		cancel()
 		return nil, err
@@ -148,8 +156,10 @@ func newL2OOSubmitter(ctx context.Context, cancel context.CancelFunc, setup Driv
 		cancel:      cancel,
 
 		l2ooContract: l2ooContract,
-		l2ooABI:      parsed,
-		db:           *db,
+		l2ooABI:      l2ooAbiParsed,
+		dgfABI:       dfgAbiParsed,
+
+		db: *db,
 	}, nil
 }
 
@@ -486,6 +496,15 @@ func proposeL2OutputTxData(abi *abi.ABI, output *eth.OutputResponse, proof []byt
 		proof)
 }
 
+func (l *L2OutputSubmitter) ProposeL2OutputDGFTxData(output *eth.OutputResponse, proof []byte, l1BlockNum uint64) ([]byte, error) {
+	return l.dgfABI.Pack(
+		"create",
+		output.OutputRoot,
+		new(big.Int).SetUint64(output.BlockRef.Number),
+		new(big.Int).SetUint64(l1BlockNum),
+		proof)
+}
+
 func (l *L2OutputSubmitter) CheckpointBlockHashTxData(blockNumber *big.Int) ([]byte, error) {
 	return l.l2ooABI.Pack("checkpointBlockHash", blockNumber)
 }
@@ -526,7 +545,19 @@ func (l *L2OutputSubmitter) sendTransaction(ctx context.Context, output *eth.Out
 	l.Log.Info("Proposing output root", "output", output.OutputRoot, "block", output.BlockRef)
 	var receipt *types.Receipt
 	if l.Cfg.DisputeGameFactoryAddr != nil {
-		return errors.New("not implemented")
+		data, err := l.ProposeL2OutputDGFTxData(output, proof, l1BlockNum)
+		if err != nil {
+			return err
+		}
+		// TODO: This currently blocks the loop while it waits for the transaction to be confirmed. Up to 3 minutes.
+		receipt, err = l.Txmgr.Send(ctx, txmgr.TxCandidate{
+			TxData:   data,
+			To:       l.Cfg.DisputeGameFactoryAddr,
+			GasLimit: 0,
+		})
+		if err != nil {
+			return err
+		}
 	} else {
 		data, err := l.ProposeL2OutputTxData(output, proof, l1BlockNum)
 		if err != nil {
@@ -547,32 +578,6 @@ func (l *L2OutputSubmitter) sendTransaction(ctx context.Context, output *eth.Out
 		l.Log.Error("Proposer tx successfully published but reverted", "tx_hash", receipt.TxHash)
 	} else {
 		l.Log.Info("Proposer tx successfully published", "tx_hash", receipt.TxHash)
-	}
-	return nil
-}
-
-// sendCheckpointTransaction sends a transaction to checkpoint the blockhash corresponding to `blockNumber` on the L2OO contract.
-func (l *L2OutputSubmitter) sendCheckpointTransaction(ctx context.Context, blockNumber *big.Int) error {
-	var receipt *types.Receipt
-	data, err := l.CheckpointBlockHashTxData(blockNumber)
-	if err != nil {
-		return err
-	}
-	// TODO: This currently blocks the loop while it waits for the transaction to be confirmed. Up to 3 minutes.
-	receipt, err = l.Txmgr.Send(ctx, txmgr.TxCandidate{
-		TxData:   data,
-		To:       l.Cfg.L2OutputOracleAddr,
-		GasLimit: 0,
-	})
-	if err != nil {
-		return err
-	}
-
-	if receipt.Status == types.ReceiptStatusFailed {
-		l.Log.Error("checkpoint blockhash tx successfully published but reverted", "tx_hash", receipt.TxHash)
-	} else {
-		l.Log.Info("checkpoint blockhash tx successfully published",
-			"tx_hash", receipt.TxHash)
 	}
 	return nil
 }
@@ -639,39 +644,48 @@ func (l *L2OutputSubmitter) loopL2OO(ctx context.Context) {
 				continue
 			}
 
-			// 2) Check the statuses of all requested proofs.
+			// 2) Check the statuses of PROVING requests.
 			// If it's successfully returned, we validate that we have it on disk and set status = "COMPLETE".
 			// If it fails or times out, we set status = "FAILED" (and, if it's a span proof, split the request in half to try again).
-			l.Log.Info("Stage 2: Processing Pending Proofs...")
-			err = l.ProcessPendingProofs()
+			l.Log.Info("Stage 2: Processing PROVING requests...")
+			err = l.ProcessProvingRequests()
 			if err != nil {
-				l.Log.Error("failed to update requested proofs", "err", err)
+				l.Log.Error("failed to update PROVING requests", "err", err)
 				continue
 			}
 
-			// 3) Determine if there is a continguous chain of span proofs starting from the latest block on the L2OO contract.
+			// 3) Check the statuses of WITNESSGEN requests.
+			// If the witness generation request has been in the WITNESSGEN state for longer than the timeout, set status to FAILED and retry.
+			l.Log.Info("Stage 3: Processing WITNESSGEN requests...")
+			err = l.ProcessWitnessgenRequests()
+			if err != nil {
+				l.Log.Error("failed to update WITNESSGEN requests", "err", err)
+				continue
+			}
+
+			// 4) Determine if there is a continguous chain of span proofs starting from the latest block on the L2OO contract.
 			// If there is, queue an aggregate proof for all of the span proofs.
-			l.Log.Info("Stage 3: Deriving Agg Proofs...")
+			l.Log.Info("Stage 4: Deriving Agg Proofs...")
 			err = l.DeriveAggProofs(ctx)
 			if err != nil {
 				l.Log.Error("failed to generate pending agg proofs", "err", err)
 				continue
 			}
 
-			// 4) Request all unrequested proofs from the prover network.
+			// 5) Request all unrequested proofs from the prover network.
 			// Any DB entry with status = "UNREQ" means it's queued up and ready.
 			// We request all of these (both span and agg) from the prover network.
 			// For agg proofs, we also checkpoint the blockhash in advance.
-			l.Log.Info("Stage 4: Requesting Queued Proofs...")
+			l.Log.Info("Stage 5: Requesting Queued Proofs...")
 			err = l.RequestQueuedProofs(ctx)
 			if err != nil {
 				l.Log.Error("failed to request unrequested proofs", "err", err)
 				continue
 			}
 
-			// 5) Submit agg proofs on chain.
+			// 6) Submit agg proofs on chain.
 			// If we have a completed agg proof waiting in the DB, we submit them on chain.
-			l.Log.Info("Stage 5: Submitting Agg Proofs...")
+			l.Log.Info("Stage 6: Submitting Agg Proofs...")
 			err = l.SubmitAggProofs(ctx)
 			if err != nil {
 				l.Log.Error("failed to submit agg proofs", "err", err)
@@ -735,9 +749,43 @@ func (l *L2OutputSubmitter) checkpointBlockHash(ctx context.Context) (uint64, co
 	blockHash := header.Hash()
 	blockNumber := header.Number
 
-	err = l.sendCheckpointTransaction(cCtx, blockNumber)
+	// Check if the block hash has ALREADY been checkpointed on the L2OO contract.
+	// If it has, we can skip the checkpointing step.
+	contract, err := opsuccinctbindings.NewOPSuccinctL2OutputOracleCaller(*l.Cfg.L2OutputOracleAddr, l.L1Client)
 	if err != nil {
 		return 0, common.Hash{}, err
+	}
+	maybeBlockHash, err := contract.HistoricBlockHashes(&bind.CallOpts{Context: cCtx}, blockNumber)
+	if err != nil {
+		return 0, common.Hash{}, err
+	}
+	if maybeBlockHash != (common.Hash{}) {
+		l.Log.Info("Block hash already checkpointed on L2OO contract", "block_number", blockNumber, "block_hash", blockHash)
+		return blockNumber.Uint64(), blockHash, nil
+	}
+
+	// If not, send a transaction to checkpoint the blockhash on the L2OO contract.
+	var receipt *types.Receipt
+	data, err := l.CheckpointBlockHashTxData(blockNumber)
+	if err != nil {
+		return 0, common.Hash{}, err
+	}
+
+	// TODO: This currently blocks the loop while it waits for the transaction to be confirmed. Up to 3 minutes.
+	receipt, err = l.Txmgr.Send(ctx, txmgr.TxCandidate{
+		TxData:   data,
+		To:       l.Cfg.L2OutputOracleAddr,
+		GasLimit: 0,
+	})
+	if err != nil {
+		return 0, common.Hash{}, err
+	}
+
+	if receipt.Status == types.ReceiptStatusFailed {
+		l.Log.Error("checkpoint blockhash tx successfully published but reverted", "tx_hash", receipt.TxHash)
+	} else {
+		l.Log.Info("checkpoint blockhash tx successfully published",
+			"tx_hash", receipt.TxHash)
 	}
 	return blockNumber.Uint64(), blockHash, nil
 }

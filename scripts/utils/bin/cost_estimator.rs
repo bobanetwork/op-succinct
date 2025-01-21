@@ -25,7 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const MULTI_BLOCK_ELF: &[u8] = include_bytes!("../../../elf/range-elf");
+pub const RANGE_ELF: &[u8] = include_bytes!("../../../elf/range-elf");
 
 const TWELVE_HOURS: Duration = Duration::from_secs(60 * 60 * 12);
 
@@ -34,7 +34,6 @@ const TWELVE_HOURS: Duration = Duration::from_secs(60 * 60 * 12);
 async fn execute_blocks_and_write_stats_csv(
     host_clis: &[HostCli],
     ranges: Vec<SpanBatchRange>,
-    prover: &ProverClient,
     l2_chain_id: u64,
     start: u64,
     end: u64,
@@ -73,6 +72,8 @@ async fn execute_blocks_and_write_stats_csv(
     fs::File::create(&report_path).unwrap();
     let report_path = report_path.canonicalize().unwrap();
 
+    let prover = ProverClient::builder().cpu().build();
+
     // Run the zkVM execution process for each split range in parallel and fill in the execution stats.
     host_clis
         .par_iter()
@@ -81,7 +82,7 @@ async fn execute_blocks_and_write_stats_csv(
             let sp1_stdin = get_proof_stdin(host_cli).unwrap();
 
             // FIXME: Implement retries with a smaller block range if this fails.
-            let result = prover.execute(MULTI_BLOCK_ELF, sp1_stdin).run();
+            let result = prover.execute(RANGE_ELF, &sp1_stdin).run();
 
             // If the execution fails, skip this block range and log the error.
             if let Some(err) = result.as_ref().err() {
@@ -150,6 +151,7 @@ fn aggregate_execution_stats(
         aggregate_stats.bn_mul_cycles += stats.bn_mul_cycles;
         aggregate_stats.kzg_eval_cycles += stats.kzg_eval_cycles;
         aggregate_stats.ec_recover_cycles += stats.ec_recover_cycles;
+        aggregate_stats.p256_verify_cycles += stats.p256_verify_cycles;
     }
 
     // For statistics that are per-block or per-transaction, we take the average over the entire
@@ -206,8 +208,6 @@ async fn main() -> Result<()> {
         split_ranges
     );
 
-    let prover = ProverClient::new();
-
     let cache_mode = if args.use_cache {
         CacheMode::KeepCache
     } else {
@@ -237,7 +237,6 @@ async fn main() -> Result<()> {
     execute_blocks_and_write_stats_csv(
         &host_clis,
         split_ranges,
-        &prover,
         l2_chain_id,
         l2_start_block,
         l2_end_block,

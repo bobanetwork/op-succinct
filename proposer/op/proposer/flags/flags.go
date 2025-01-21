@@ -44,6 +44,11 @@ var (
 		Usage:   "Address of the L2OutputOracle contract",
 		EnvVars: prefixEnvVars("L2OO_ADDRESS"),
 	}
+	DGFAddressFlag = &cli.StringFlag{
+		Name:    "dgf-address",
+		Usage:   "Address of the DisputeGameFactory contract",
+		EnvVars: prefixEnvVars("DGF_ADDRESS"),
+	}
 	PollIntervalFlag = &cli.DurationFlag{
 		Name:    "poll-interval",
 		Usage:   "How frequently to poll L2 for new blocks (legacy L2OO)",
@@ -91,9 +96,23 @@ var (
 		Value:   50,
 		EnvVars: prefixEnvVars("MAX_BLOCK_RANGE_PER_SPAN_PROOF"),
 	}
+	// This limit is set to prevent overloading the witness generation server. Until Kona improves their native I/O API (https://github.com/anton-rs/kona/issues/553)
+	// the maximum number of concurrent witness generation requests is roughly num_cpu / 2. Set it to 5 for now to be safe.
+	MaxConcurrentWitnessGenFlag = &cli.Uint64Flag{
+		Name:    "max-concurrent-witness-gen",
+		Usage:   "Maximum number of concurrent witness generation processes",
+		Value:   5,
+		EnvVars: prefixEnvVars("MAX_CONCURRENT_WITNESS_GEN"),
+	}
+	WitnessGenTimeoutFlag = &cli.Uint64Flag{
+		Name:    "witness-gen-timeout",
+		Usage:   "Maximum time in seconds to spend generating a witness before giving up",
+		Value:   20 * 60,
+		EnvVars: prefixEnvVars("WITNESS_GEN_TIMEOUT"),
+	}
 	ProofTimeoutFlag = &cli.Uint64Flag{
-		Name:    "proof-timeout",
-		Usage:   "Maximum time in seconds to spend generating a proof before giving up",
+		Name:  "proof-timeout",
+		Usage: "Maximum time in seconds to spend generating a proof before giving up",
 		// If a proof takes more than 4 hours, assume the cluster failed to set it to failed state.
 		Value:   14400,
 		EnvVars: prefixEnvVars("MAX_PROOF_TIME"),
@@ -109,22 +128,6 @@ var (
 		Usage:   "Maximum number of proofs to generate concurrently",
 		Value:   20,
 		EnvVars: prefixEnvVars("MAX_CONCURRENT_PROOF_REQUESTS"),
-	}
-	TxCacheOutDirFlag = &cli.StringFlag{
-		Name:    "tx-cache-out-dir",
-		Usage:   "Cache directory for the found transactions to determine span batch boundaries",
-		Value:   "/tmp/batch_decoder/transactions_cache",
-		EnvVars: prefixEnvVars("TX_CACHE_OUT_DIR"),
-	}
-	BatchInboxFlag = &cli.StringFlag{
-		Name:    "batch-inbox",
-		Usage:   "Batch Inbox Address",
-		EnvVars: prefixEnvVars("BATCH_INBOX"),
-	}
-	BatcherAddressFlag = &cli.StringFlag{
-		Name:    "batcher-address",
-		Usage:   "Batch Sender Address",
-		EnvVars: prefixEnvVars("BATCHER_ADDRESS"),
 	}
 	MockFlag = &cli.BoolFlag{
 		Name:    "mock",
@@ -145,6 +148,7 @@ var requiredFlags = []cli.Flag{
 
 var optionalFlags = []cli.Flag{
 	L2OOAddressFlag,
+	DGFAddressFlag,
 	PollIntervalFlag,
 	AllowNonFinalizedFlag,
 	L2OutputHDPathFlag,
@@ -154,13 +158,12 @@ var optionalFlags = []cli.Flag{
 	UseCachedDbFlag,
 	SlackTokenFlag,
 	MaxBlockRangePerSpanProofFlag,
-	TxCacheOutDirFlag,
+	MaxConcurrentWitnessGenFlag,
 	OPSuccinctServerUrlFlag,
 	ProofTimeoutFlag,
 	MaxConcurrentProofRequestsFlag,
-	BatchInboxFlag,
-	BatcherAddressFlag,
 	MockFlag,
+	WitnessGenTimeoutFlag,
 }
 
 func init() {

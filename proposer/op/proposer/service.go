@@ -57,14 +57,13 @@ type ProposerConfig struct {
 	SlackToken                 string
 	BeaconRpc                  string
 	RollupRpc                  string
-	TxCacheOutDir              string
 	MaxBlockRangePerSpanProof  uint64
+	MaxConcurrentWitnessGen    uint64
+	WitnessGenTimeout          uint64
 	L2ChainID                  uint64
 	ProofTimeout               uint64
 	OPSuccinctServerUrl        string
 	MaxConcurrentProofRequests uint64
-	BatchInbox                 common.Address
-	BatcherAddress             common.Address
 	Mock                       bool
 }
 
@@ -120,17 +119,17 @@ func (ps *ProposerService) initFromCLIConfig(ctx context.Context, version string
 	ps.SlackToken = cfg.SlackToken
 	ps.BeaconRpc = cfg.BeaconRpc
 	ps.RollupRpc = cfg.RollupRpc
-	ps.TxCacheOutDir = cfg.TxCacheOutDir
 	ps.MaxBlockRangePerSpanProof = cfg.MaxBlockRangePerSpanProof
+	ps.MaxConcurrentWitnessGen = cfg.MaxConcurrentWitnessGen
+	ps.WitnessGenTimeout = cfg.WitnessGenTimeout
 	ps.OPSuccinctServerUrl = cfg.OPSuccinctServerUrl
 	ps.ProofTimeout = cfg.ProofTimeout
 	ps.L2ChainID = cfg.L2ChainID
 	ps.MaxConcurrentProofRequests = cfg.MaxConcurrentProofRequests
-	ps.BatchInbox = common.HexToAddress(cfg.BatchInbox)
-	ps.BatcherAddress = common.HexToAddress(cfg.BatcherAddress)
 	ps.Mock = cfg.Mock
 
 	ps.initL2ooAddress(cfg)
+	ps.initDGF(cfg)
 
 	if err := ps.initRPCClients(ctx, cfg); err != nil {
 		return err
@@ -246,6 +245,15 @@ func (ps *ProposerService) initL2ooAddress(cfg *CLIConfig) {
 		return
 	}
 	ps.L2OutputOracleAddr = &l2ooAddress
+}
+
+func (ps *ProposerService) initDGF(cfg *CLIConfig) {
+	dgfAddress, err := opservice.ParseAddress(cfg.DGFAddress)
+	if err != nil {
+		// Return no error & set no DGF related configuration fields.
+		return
+	}
+	ps.DisputeGameFactoryAddr = &dgfAddress
 }
 
 func (ps *ProposerService) initDriver() error {
