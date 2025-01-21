@@ -17,32 +17,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-    - name: Compile the fault proof program
-      run: cargo build --profile release-client-lto
-      working-directory: programs/fault-proof
+    - name: Setup CI
+      uses: ./.github/actions/setup
     - name: Compile the range program
       run: cargo build --profile release-client-lto
       working-directory: programs/range
-  build_zkvm_programs:
-    runs-on:
-      - runs-on
-      - runner=64cpu-linux-arm64
-      - run-id=${{ github.run_id }} 
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    - name: Install SP1 toolchain
-      run: |
-        curl -L https://sp1.succinct.xyz | bash
-        ~/.sp1/bin/sp1up 
-        ~/.sp1/bin/cargo-prove prove --version
-        source ~/.bashrc
-    - name: Compile the fault proof program
-      run: ~/.sp1/bin/cargo-prove prove build --binary fault-proof
-      working-directory: programs/fault-proof
-    - name: Compile the range program
-      run: ~/.sp1/bin/cargo-prove prove build --binary range
-      working-directory: programs/range
-    - name: Compile the aggregation program
-      run: ~/.sp1/bin/cargo-prove prove build --binary aggregation
-      working-directory: programs/aggregation

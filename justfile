@@ -29,60 +29,14 @@ run-multi start end use-cache="false" prove="false":
   cargo run --bin multi --release -- --start {{start}} --end {{end}} $CACHE_FLAG $PROVE_FLAG
 
 # Runs the cost estimator for a given block range.
-cost-estimator start end:
+# If no range is provided, runs for the last 5 finalized blocks.
+cost-estimator *args='':
   #!/usr/bin/env bash
-  cargo run --bin cost-estimator --release -- --start {{start}} --end {{end}}
-
-# Runs the client program in native execution mode. Modified version of Kona Native Client execution:
-# https://github.com/ethereum-optimism/kona/blob/ae71b9df103c941c06b0dc5400223c4f13fe5717/bin/client/justfile#L65-L108
-run-client-native l2_block_num l1_rpc='${L1_RPC}' l1_beacon_rpc='${L1_BEACON_RPC}' l2_rpc='${L2_RPC}' verbosity="-vvvv":
-  #!/usr/bin/env bash
-  L1_NODE_ADDRESS="{{l1_rpc}}"
-  L1_BEACON_ADDRESS="{{l1_beacon_rpc}}"
-  L2_NODE_ADDRESS="{{l2_rpc}}"
-  echo "L1 Node Address: $L1_NODE_ADDRESS"
-  echo "L1 Beacon Address: $L1_BEACON_ADDRESS"
-  echo "L2 Node Address: $L2_NODE_ADDRESS"
-  HOST_BIN_PATH="./kona-host"
-  CLIENT_BIN_PATH="$(pwd)/target/release-client-lto/fault-proof"
-  L2_BLOCK_NUMBER="{{l2_block_num}}"
-  L2_BLOCK_SAFE_HEAD=$((L2_BLOCK_NUMBER - 1))
-  L2_OUTPUT_STATE_ROOT=$(cast block --rpc-url $L2_NODE_ADDRESS --field stateRoot $L2_BLOCK_SAFE_HEAD)
-  L2_HEAD=$(cast block --rpc-url $L2_NODE_ADDRESS --field hash $L2_BLOCK_SAFE_HEAD)
-  L2_OUTPUT_STORAGE_HASH=$(cast proof --rpc-url $L2_NODE_ADDRESS --block $L2_BLOCK_SAFE_HEAD 0x4200000000000000000000000000000000000016 | jq -r '.storageHash')
-  L2_OUTPUT_ENCODED=$(cast abi-encode "x(uint256,bytes32,bytes32,bytes32)" 0 $L2_OUTPUT_STATE_ROOT $L2_OUTPUT_STORAGE_HASH $L2_HEAD)
-  L2_OUTPUT_ROOT=$(cast keccak $L2_OUTPUT_ENCODED)
-  echo "L2 Safe Head: $L2_BLOCK_SAFE_HEAD"
-  echo "Safe Head Output Root: $L2_OUTPUT_ROOT"
-  L2_CLAIM_STATE_ROOT=$(cast block --rpc-url $L2_NODE_ADDRESS --field stateRoot $L2_BLOCK_NUMBER)
-  L2_CLAIM_HASH=$(cast block --rpc-url $L2_NODE_ADDRESS --field hash $L2_BLOCK_NUMBER)
-  L2_CLAIM_STORAGE_HASH=$(cast proof --rpc-url $L2_NODE_ADDRESS --block $L2_BLOCK_NUMBER 0x4200000000000000000000000000000000000016 | jq -r '.storageHash')
-  L2_CLAIM_ENCODED=$(cast abi-encode "x(uint256,bytes32,bytes32,bytes32)" 0 $L2_CLAIM_STATE_ROOT $L2_CLAIM_STORAGE_HASH $L2_CLAIM_HASH)
-  L2_CLAIM=$(cast keccak $L2_CLAIM_ENCODED)
-  echo "L2 Block Number: $L2_BLOCK_NUMBER"
-  echo "L2 Claim Root: $L2_CLAIM"
-  L2_BLOCK_TIMESTAMP=$(cast block --rpc-url $L2_NODE_ADDRESS $L2_BLOCK_NUMBER -j | jq -r .timestamp)
-  L1_HEAD=$(cast block --rpc-url $L1_NODE_ADDRESS $(cast find-block --rpc-url $L1_NODE_ADDRESS $(($(cast 2d $L2_BLOCK_TIMESTAMP) + 300))) -j | jq -r .hash)
-  echo "L1 Head: $L1_HEAD"
-  L2_CHAIN_ID=10
-  DATA_DIRECTORY="./data/$L2_BLOCK_NUMBER"
-  echo "Saving Data to $DATA_DIRECTORY"
-  echo "Building client program..."
-  cargo build --bin fault-proof --profile release-client-lto
-  echo "Running host program with native client program..."
-  cargo run --bin op-succinct-witnessgen --release -- \
-    --l1-head $L1_HEAD \
-    --l2-head $L2_HEAD \
-    --l2-claim $L2_CLAIM \
-    --l2-output-root $L2_OUTPUT_ROOT \
-    --l2-block-number $L2_BLOCK_NUMBER \
-    --l2-chain-id $L2_CHAIN_ID \
-    --l1-node-address $L1_NODE_ADDRESS \
-    --l1-beacon-address $L1_BEACON_ADDRESS \
-    --l2-node-address $L2_NODE_ADDRESS \
-    --exec $CLIENT_BIN_PATH \
-    --data-dir $DATA_DIRECTORY \
-    {{verbosity}}
+  if [ -z "{{args}}" ]; then
+    cargo run --bin cost-estimator --release
+  else
+    cargo run --bin cost-estimator --release -- {{args}}
+  fi
 
   # Output the data required for the ZKVM execution.
   echo "$L1_HEAD $L2_OUTPUT_ROOT $L2_CLAIM $L2_BLOCK_NUMBER $L2_CHAIN_ID"
@@ -123,19 +77,20 @@ deploy-mock-verifier env_file=".env":
         echo "PRIVATE_KEY not set in {{env_file}}"
         exit 1
     fi
-    
-    VERIFY_FLAGS=""
-    if [ ! -z "$ETHERSCAN_API_KEY" ]; then
-        VERIFY_FLAGS="--verify --verifier etherscan --etherscan-api-key $ETHERSCAN_API_KEY"
-    fi
 
     cd contracts
+
+    VERIFY=""
+    if [ $ETHERSCAN_API_KEY != "" ]; then
+      VERIFY="--verify --verifier etherscan --etherscan-api-key $ETHERSCAN_API_KEY"
+    fi
     
     forge script script/DeployMockVerifier.s.sol:DeployMockVerifier \
     --rpc-url $L1_RPC \
     --private-key $PRIVATE_KEY \
     --broadcast \
-    $VERIFY_FLAGS
+    $VERIFY
+
 # Deploy the OPSuccinct L2 Output Oracle
 deploy-oracle env_file=".env":
     #!/usr/bin/env bash
@@ -152,16 +107,22 @@ deploy-oracle env_file=".env":
 
     # forge install
     forge install
+
+    VERIFY=""
+    if [ $ETHERSCAN_API_KEY != "" ]; then
+      VERIFY="--verify --verifier etherscan --etherscan-api-key $ETHERSCAN_API_KEY"
+    fi
+    
+    ENV_VARS=""
+    if [ -n "${ADMIN_PK:-}" ]; then ENV_VARS="$ENV_VARS ADMIN_PK=$ADMIN_PK"; fi
+    if [ -n "${DEPLOY_PK:-}" ]; then ENV_VARS="$ENV_VARS DEPLOY_PK=$DEPLOY_PK"; fi
     
     # Run the forge deployment script
-    forge script script/OPSuccinctDeployer.s.sol:OPSuccinctDeployer \
+    $ENV_VARS forge script script/OPSuccinctDeployer.s.sol:OPSuccinctDeployer \
         --rpc-url $L1_RPC \
         --private-key $PRIVATE_KEY \
         --broadcast \
-        --verify \
-        --verifier etherscan \
-        --etherscan-api-key $ETHERSCAN_API_KEY
-
+        $VERIFY
 
 # Upgrade the OPSuccinct L2 Output Oracle
 upgrade-oracle env_file=".env":
@@ -181,13 +142,19 @@ upgrade-oracle env_file=".env":
     forge install
     
     # Run the forge upgrade script
+    
+    ENV_VARS="L2OO_ADDRESS=$L2OO_ADDRESS"
+    if [ -n "${EXECUTE_UPGRADE_CALL:-}" ]; then ENV_VARS="$ENV_VARS EXECUTE_UPGRADE_CALL=$EXECUTE_UPGRADE_CALL"; fi
+    if [ -n "${ADMIN_PK:-}" ]; then ENV_VARS="$ENV_VARS ADMIN_PK=$ADMIN_PK"; fi
+    if [ -n "${DEPLOY_PK:-}" ]; then ENV_VARS="$ENV_VARS DEPLOY_PK=$DEPLOY_PK"; fi
+    
     if [ "${EXECUTE_UPGRADE_CALL:-true}" = "false" ]; then
-        L2OO_ADDRESS=$L2OO_ADDRESS forge script script/OPSuccinctUpgrader.s.sol:OPSuccinctUpgrader \
+        $ENV_VARS forge script script/OPSuccinctUpgrader.s.sol:OPSuccinctUpgrader \
             --rpc-url $L1_RPC \
             --private-key $PRIVATE_KEY \
             --etherscan-api-key $ETHERSCAN_API_KEY
     else
-        L2OO_ADDRESS=$L2OO_ADDRESS forge script script/OPSuccinctUpgrader.s.sol:OPSuccinctUpgrader \
+        $ENV_VARS forge script script/OPSuccinctUpgrader.s.sol:OPSuccinctUpgrader \
             --rpc-url $L1_RPC \
             --private-key $PRIVATE_KEY \
             --verify \
@@ -214,13 +181,46 @@ update-parameters env_file=".env":
     forge install
     
     # Run the forge upgrade script
+    ENV_VARS="L2OO_ADDRESS=$L2OO_ADDRESS"
+    if [ -n "${EXECUTE_UPGRADE_CALL:-}" ]; then ENV_VARS="$ENV_VARS EXECUTE_UPGRADE_CALL=$EXECUTE_UPGRADE_CALL"; fi
+    if [ -n "${ADMIN_PK:-}" ]; then ENV_VARS="$ENV_VARS ADMIN_PK=$ADMIN_PK"; fi
+    if [ -n "${DEPLOY_PK:-}" ]; then ENV_VARS="$ENV_VARS DEPLOY_PK=$DEPLOY_PK"; fi
+
+
     if [ "${EXECUTE_UPGRADE_CALL:-true}" = "false" ]; then
-        L2OO_ADDRESS=$L2OO_ADDRESS forge script script/OPSuccinctParameterUpdater.s.sol:OPSuccinctParameterUpdater \
-            --rpc-url $L1_RPC \
-            --private-key $PRIVATE_KEY
-    else
-        L2OO_ADDRESS=$L2OO_ADDRESS forge script script/OPSuccinctParameterUpdater.s.sol:OPSuccinctParameterUpdater \
+        $ENV_VARS forge script script/OPSuccinctParameterUpdater.s.sol:OPSuccinctParameterUpdater \
             --rpc-url $L1_RPC \
             --private-key $PRIVATE_KEY \
             --broadcast
+    else
+        $ENV_VARS forge script script/OPSuccinctParameterUpdater.s.sol:OPSuccinctParameterUpdater \
+            --rpc-url $L1_RPC \
+            --private-key $PRIVATE_KEY \
+            --broadcast
+    fi
+
+deploy-dispute-game-factory env_file=".env":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    
+    # Load environment variables
+    source {{env_file}}
+
+    # cd into contracts directory
+    cd contracts
+
+    # forge install
+    forge install
+
+    VERIFY=""
+    if [ $ETHERSCAN_API_KEY != "" ]; then
+      VERIFY="--verify --verifier etherscan --etherscan-api-key $ETHERSCAN_API_KEY"
+    fi
+    
+    # Run the forge deployment script
+    L2OO_ADDRESS=$L2OO_ADDRESS forge script script/OPSuccinctDGFDeployer.s.sol:OPSuccinctDFGDeployer \
+        --rpc-url $L1_RPC \
+        --private-key $PRIVATE_KEY \
+        --broadcast \
+        $VERIFY
     fi

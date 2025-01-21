@@ -20,9 +20,12 @@ pub struct HostExecutorArgs {
     #[clap(long)]
     pub rolling: bool,
     /// The number of blocks to use for the default range.
-    #[clap(long, default_value = "100")]
+    #[clap(long, default_value = "5")]
     pub default_range: u64,
     /// The environment file to use.
     #[clap(long, default_value = ".env")]
     pub env_file: PathBuf,
+    /// Whether to generate proofs.
+    #[clap(long)]
+    pub prove: bool,
 }

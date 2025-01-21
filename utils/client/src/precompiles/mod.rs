@@ -18,9 +18,13 @@ macro_rules! create_annotated_precompile {
                 let precompile = $precompile.precompile();
                 match precompile {
                     Precompile::Standard(precompile) => {
-                        println!(concat!("cycle-tracker-report-start: precompile-", $name));
+                        if cfg!(target_os = "zkvm") {
+                            println!(concat!("cycle-tracker-report-start: precompile-", $name));
+                        }
                         let result = precompile(input, gas_limit);
-                        println!(concat!("cycle-tracker-report-end: precompile-", $name));
+                        if cfg!(target_os = "zkvm") {
+                            println!(concat!("cycle-tracker-report-end: precompile-", $name));
+                        }
                         result
                     }
                     _ => panic!("Annotated precompile must be a standard precompile."),
@@ -42,6 +46,8 @@ pub(crate) const ANNOTATED_KZG_EVAL: PrecompileWithAddress = create_annotated_pr
 );
 pub(crate) const ANNOTATED_EC_RECOVER: PrecompileWithAddress =
     create_annotated_precompile!(revm::precompile::secp256k1::ECRECOVER, "ec-recover");
+pub(crate) const ANNOTATED_P256_VERIFY: PrecompileWithAddress =
+    create_annotated_precompile!(revm::precompile::secp256r1::P256VERIFY, "p256-verify");
 
 // Source: https://github.com/anton-rs/kona/blob/main/bin/client/src/fault/handler/mod.rs#L20-L42
 pub fn zkvm_handle_register<F, H>(handler: &mut EvmHandler<'_, (), &mut State<&mut TrieDB<F, H>>>)
@@ -64,6 +70,7 @@ where
             ANNOTATED_BN_PAIR,
             ANNOTATED_KZG_EVAL,
             ANNOTATED_EC_RECOVER,
+            ANNOTATED_P256_VERIFY,
         ];
         ctx_precompiles.extend(override_precompiles);
 
